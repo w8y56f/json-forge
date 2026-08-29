@@ -189,7 +189,7 @@ class MoreSettingsDialog(QDialog):
 
 
 class JsonHighlighter(QSyntaxHighlighter):
-    def __init__(self, document, theme: str = "dark"):
+    def __init__(self, document, theme: str = "light"):
         super().__init__(document)
         self.set_theme(theme)
 
@@ -481,6 +481,63 @@ class JsonEditor(QPlainTextEdit):
                 return current_position
         return None
 
+    def _select_container_contents_at(self, position: int) -> bool:
+        # For double-click selection, prefer the bracket directly under the
+        # caret before the one immediately preceding it. This distinguishes
+        # the outer bracket correctly in adjacent closers such as "}}".
+        bracket = None
+        for operation in (
+            QTextCursor.MoveOperation.NextCharacter,
+            QTextCursor.MoveOperation.PreviousCharacter,
+        ):
+            candidate = QTextCursor(self.document())
+            candidate.setPosition(position)
+            if not candidate.movePosition(operation, QTextCursor.MoveMode.KeepAnchor):
+                continue
+            candidate_position = candidate.selectionStart()
+            if candidate.selectedText() in "{}[]" and candidate_position in self.brace_pairs:
+                bracket = candidate_position
+                break
+        if bracket is None:
+            return False
+
+        character_cursor = QTextCursor(self.document())
+        character_cursor.setPosition(bracket)
+        character_cursor.movePosition(
+            QTextCursor.MoveOperation.NextCharacter,
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        character = character_cursor.selectedText()
+        if character in "{[":
+            opening = bracket
+            closing = self.brace_pairs.get(bracket)
+        elif character in "}]":
+            opening = self.brace_pairs.get(bracket)
+            closing = bracket
+        else:
+            return False
+
+        if opening is None or closing is None or closing <= opening:
+            return False
+
+        opening_block = self.document().findBlock(opening).blockNumber()
+        if opening_block in self.collapsed_blocks:
+            self.collapsed_blocks.remove(opening_block)
+            self._apply_fold_visibility()
+
+        selection = QTextCursor(self.document())
+        selection.setPosition(opening + 1)
+        selection.setPosition(closing, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(selection)
+        return True
+
+    def mouseDoubleClickEvent(self, event):
+        click_position = self.cursorForPosition(event.position().toPoint()).position()
+        if self._select_container_contents_at(click_position):
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def _update_brace_highlight(self):
         if not hasattr(self, "brace_pairs"):
             return
@@ -558,9 +615,9 @@ class JsonWindow(QMainWindow):
         self.search_candidate_selection: tuple[int, int] | None = None
         self.selecting_search_match = False
         self.settings = QSettings("LocalTools", "JSON Studio")
-        self.theme = self.settings.value("theme", "dark")
+        self.theme = self.settings.value("theme", "light")
         if self.theme not in ("light", "dark"):
-            self.theme = "dark"
+            self.theme = "light"
         self.language = self.settings.value("language", "zh_CN")
         if self.language not in ("zh_CN", "en"):
             self.language = "zh_CN"

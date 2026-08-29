@@ -6,7 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from app import JsonEditor, JsonWindow, MoreSettingsDialog, platform_shortcut_hint
@@ -57,6 +57,7 @@ class LanguageUiTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_language_switch_updates_buttons_hover_and_status(self):
+        self.assertEqual(self.window.theme, "light")
         self.window.apply_language("en")
         self.assertEqual(self.window.compact_button.text(), "Minify JSON")
         self.assertEqual(self.window.tab_bar.rename_hint, "Double-click the tab title to rename")
@@ -170,6 +171,78 @@ class BraceMatchingTests(unittest.TestCase):
             [selection.cursor.selectedText() for selection in self.editor.brace_extra_selections],
             ["{", "}"],
         )
+
+    def test_double_click_after_container_start_selects_inner_content(self):
+        text = '{"items": [1, {"name": "Alice"}]}'
+        self.editor.setPlainText(text)
+        self.app.processEvents()
+        opening = text.index("[")
+
+        selected = self.editor._select_container_contents_at(opening + 1)
+
+        self.assertTrue(selected)
+        self.assertEqual(self.editor.textCursor().selectedText(), '1, {"name": "Alice"}')
+
+    def test_container_selection_uses_utf16_positions_after_emoji(self):
+        text = '{"emoji": "😀", "items": [1, 2]}'
+        self.editor.setPlainText(text)
+        self.app.processEvents()
+        python_opening = text.index("[")
+        qt_opening = python_opening + 1
+
+        self.assertTrue(self.editor._select_container_contents_at(qt_opening + 1))
+        self.assertEqual(self.editor.textCursor().selectedText(), "1, 2")
+
+    def test_double_click_selection_ignores_parentheses(self):
+        text = '(value)'
+        self.editor.setPlainText(text)
+        self.app.processEvents()
+
+        self.assertFalse(self.editor._select_container_contents_at(1))
+        self.assertFalse(self.editor.textCursor().hasSelection())
+
+    def test_on_or_after_container_end_selects_inner_content(self):
+        for text, closing_character in (
+            ('{"name": "Alice"}', "}"),
+            ('["Java", "SQL"]', "]"),
+        ):
+            with self.subTest(closing=closing_character):
+                self.editor.setPlainText(text)
+                self.app.processEvents()
+                closing = text.rindex(closing_character)
+                for position in (closing, closing + 1):
+                    self.assertTrue(self.editor._select_container_contents_at(position))
+                    self.assertEqual(self.editor.textCursor().selectedText(), text[1:-1])
+
+    def test_current_outer_closer_wins_over_adjacent_inner_closer(self):
+        text = '{"outer": {"inner": 1}}'
+        self.editor.setPlainText(text)
+        self.app.processEvents()
+        outer_closing = text.rindex("}")
+
+        self.assertTrue(self.editor._select_container_contents_at(outer_closing))
+        self.assertEqual(self.editor.textCursor().selectedText(), text[1:-1])
+
+    def test_real_mouse_double_click_selects_array_contents(self):
+        text = '{"items": [1, 2, 3]}'
+        self.editor.resize(600, 240)
+        self.editor.show()
+        self.editor.setPlainText(text)
+        opening = text.index("[")
+        cursor = self.editor.textCursor()
+        cursor.setPosition(opening + 1)
+        self.editor.setTextCursor(cursor)
+        self.app.processEvents()
+
+        QTest.mouseDClick(
+            self.editor.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            self.editor.cursorRect(cursor).center(),
+        )
+        self.app.processEvents()
+
+        self.assertEqual(self.editor.textCursor().selectedText(), "1, 2, 3")
 
 
 if __name__ == "__main__":
