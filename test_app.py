@@ -16,6 +16,7 @@ from app import (
     MoreSettingsDialog,
     create_app_settings,
     platform_shortcut_hint,
+    session_file_path,
     settings_file_path,
 )
 
@@ -42,6 +43,56 @@ class SettingsStorageTests(unittest.TestCase):
                     os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
                 else:
                     os.environ["JSON_STUDIO_SETTINGS_PATH"] = previous
+
+
+class SessionPersistenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.settings_path = os.path.join(self.directory.name, "settings.ini")
+        self.session_path = os.path.join(self.directory.name, "session.json")
+        os.environ["JSON_STUDIO_SETTINGS_PATH"] = self.settings_path
+        os.environ["JSON_STUDIO_SESSION_PATH"] = self.session_path
+        settings = QSettings(self.settings_path, QSettings.Format.IniFormat)
+        settings.setValue("confirm_exit", False)
+        settings.sync()
+
+    def tearDown(self):
+        os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
+        os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
+        self.directory.cleanup()
+
+    def test_tabs_and_editor_state_are_restored(self):
+        window = JsonWindow()
+        window.editor.setPlainText('{\n  "name": "Alice",\n  "items": [1, 2]\n}')
+        window.editor.set_bookmark(1)
+        window.editor.toggle_fold(0)
+        window.tab_bar.setTabText(0, "payload")
+        window._mark_session_dirty()
+
+        window.add_tab()
+        window.editor.setPlainText('{"second": true}')
+        window.tab_bar.setTabText(1, "notes")
+        window._mark_session_dirty()
+        window._save_session(force=True)
+        self.assertTrue(os.path.exists(session_file_path()))
+        window.deleteLater()
+        self.app.processEvents()
+
+        restored = JsonWindow()
+        self.assertEqual(restored.tab_bar.count(), 2)
+        self.assertEqual(restored.tab_bar.tabText(0), "payload")
+        self.assertEqual(restored.tab_bar.tabText(1), "notes")
+        self.assertEqual(restored.editor.toPlainText(), '{"second": true}')
+        self.assertEqual(restored.tab_bar.currentIndex(), 1)
+        first_editor = restored.editor_stack.widget(0)
+        self.assertEqual(first_editor.bookmark_block_numbers(), [1])
+        self.assertEqual(first_editor.collapsed_blocks, {0})
+        restored.deleteLater()
+        self.app.processEvents()
 
 
 class PlatformHintTests(unittest.TestCase):
@@ -72,11 +123,14 @@ class LanguageUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         cls.settings_dir = tempfile.TemporaryDirectory()
         cls.settings_path = os.path.join(cls.settings_dir.name, "settings.ini")
+        cls.session_path = os.path.join(cls.settings_dir.name, "session.json")
         os.environ["JSON_STUDIO_SETTINGS_PATH"] = cls.settings_path
+        os.environ["JSON_STUDIO_SESSION_PATH"] = cls.session_path
 
     @classmethod
     def tearDownClass(cls):
         os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
+        os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
         cls.settings_dir.cleanup()
 
     def setUp(self):
@@ -318,11 +372,14 @@ class BookmarkTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         cls.settings_dir = tempfile.TemporaryDirectory()
         cls.settings_path = os.path.join(cls.settings_dir.name, "settings.ini")
+        cls.session_path = os.path.join(cls.settings_dir.name, "session.json")
         os.environ["JSON_STUDIO_SETTINGS_PATH"] = cls.settings_path
+        os.environ["JSON_STUDIO_SESSION_PATH"] = cls.session_path
 
     @classmethod
     def tearDownClass(cls):
         os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
+        os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
         cls.settings_dir.cleanup()
 
     def setUp(self):

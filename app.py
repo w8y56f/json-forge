@@ -4,6 +4,8 @@ import sys
 import platform
 import re
 import os
+import json
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRegularExpression, QSettings, QSize, Qt, QTimer, Signal
@@ -27,8 +29,10 @@ from json_tools import (
 
 
 APP_VERSION = "v1.0.0"
+APP_NAME = "JSON Forge"
 SETTINGS_ORGANIZATION = "LocalTools"
-SETTINGS_APPLICATION = "JSON Studio"
+SETTINGS_APPLICATION = APP_NAME
+LEGACY_SETTINGS_APPLICATION = "JSON Studio"
 
 
 def settings_file_path() -> Path:
@@ -39,9 +43,17 @@ def settings_file_path() -> Path:
     return Path(__file__).resolve().parent / "config" / "settings.ini"
 
 
+def session_file_path() -> Path:
+    """Return the portable last-session snapshot path."""
+    override = os.environ.get("JSON_STUDIO_SESSION_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent / "cache" / "session.json"
+
+
 def _legacy_settings() -> QSettings:
     """Open the previous native settings store without global fallbacks."""
-    settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
+    settings = QSettings(SETTINGS_ORGANIZATION, LEGACY_SETTINGS_APPLICATION)
     settings.setFallbacksEnabled(False)
     return settings
 
@@ -798,6 +810,14 @@ class JsonWindow(QMainWindow):
         self.initial_search_selection: tuple[int, int] | None = None
         self.search_candidate_selection: tuple[int, int] | None = None
         self.selecting_search_match = False
+        self._session_ready = False
+        self._session_restoring = False
+        self._session_dirty = False
+        self._last_session_snapshot: str | None = None
+        self._session_save_timer = QTimer(self)
+        self._session_save_timer.setSingleShot(True)
+        self._session_save_timer.setInterval(700)
+        self._session_save_timer.timeout.connect(self._save_session_if_dirty)
         self.settings = create_app_settings()
         self.theme = self.settings.value("theme", "light")
         if self.theme not in ("light", "dark"):
@@ -806,14 +826,19 @@ class JsonWindow(QMainWindow):
         if self.language not in ("zh_CN", "en"):
             self.language = "zh_CN"
         self.default_hint = platform_shortcut_hint(language=self.language)
-        self.setWindowTitle("JSON Studio")
+        self.setWindowTitle(APP_NAME)
         self.resize(1080, 720)
         self.setMinimumSize(760, 480)
         self._build_ui()
         self._connect()
         self.apply_language(self.language)
         self.apply_theme(self.theme)
-        self.add_tab()
+        restored = self._restore_session()
+        if not restored:
+            self.add_tab()
+        self._session_ready = True
+        self._last_session_snapshot = self._session_snapshot() if restored else None
+        self._session_dirty = False
         self.editor.setFocus()
 
     @property
@@ -861,6 +886,177 @@ class JsonWindow(QMainWindow):
     def rendered_text(self, value):
         self._set_editor_state("json_rendered_text", value)
 
+    def _session_payload(self) -> dict:
+        tabs = []
+        for index in range(self.tab_bar.count()):
+            editor = self.editor_stack.widget(index)
+            if editor is None:
+                continue
+            cursor = editor.textCursor()
+            tabs.append({
+                "title": self.tab_bar.tabText(index),
+                "content": editor.toPlainText(),
+                "cursor_position": cursor.position(),
+                "cursor_anchor": cursor.anchor(),
+                "vertical_scroll": editor.verticalScrollBar().value(),
+                "horizontal_scroll": editor.horizontalScrollBar().value(),
+                "bookmarks": editor.bookmark_block_numbers(),
+                "collapsed_blocks": sorted(editor.collapsed_blocks),
+            })
+        return {
+            "version": 1,
+            "active_tab": max(0, self.tab_bar.currentIndex()),
+            "next_tab_number": self.next_tab_number,
+            "tabs": tabs,
+        }
+
+    def _session_snapshot(self) -> str:
+        return json.dumps(
+            self._session_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _session_int(value, default: int = 0) -> int:
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    def _mark_session_dirty(self):
+        if self._session_restoring or not self._session_ready:
+            return
+        self._session_dirty = True
+        self._session_save_timer.start()
+
+    def _save_session_if_dirty(self):
+        self._save_session()
+
+    def _save_session(self, force: bool = False) -> bool:
+        if not force and not self._session_dirty:
+            return False
+        snapshot = self._session_snapshot()
+        path = session_file_path()
+        if snapshot == self._last_session_snapshot and path.exists():
+            self._session_dirty = False
+            return False
+
+        temporary_name = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=".session-",
+                suffix=".tmp",
+                dir=str(path.parent),
+                delete=False,
+            ) as temporary:
+                temporary_name = temporary.name
+                json.dump(self._session_payload(), temporary, ensure_ascii=False, indent=2)
+                temporary.write("\n")
+            os.replace(temporary_name, path)
+        except (OSError, TypeError, ValueError):
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name)
+                except OSError:
+                    pass
+            return False
+
+        self._last_session_snapshot = snapshot
+        self._session_dirty = False
+        return True
+
+    def _restore_session(self) -> bool:
+        path = session_file_path()
+        if not path.is_file():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return False
+        saved_tabs = payload.get("tabs")
+        if not isinstance(saved_tabs, list):
+            return False
+        tabs = [item for item in saved_tabs if isinstance(item, dict)]
+        if not tabs:
+            return False
+
+        self._session_restoring = True
+        try:
+            for item in tabs:
+                self.add_tab()
+                index = self.tab_bar.count() - 1
+                editor = self.editor_stack.widget(index)
+                title = item.get("title")
+                if isinstance(title, str) and title.strip():
+                    self.tab_bar.setTabText(index, title)
+                content = item.get("content", "")
+                editor.setPlainText(content if isinstance(content, str) else "")
+
+                collapsed = item.get("collapsed_blocks", [])
+                if isinstance(collapsed, list):
+                    editor.collapsed_blocks = {
+                        int(block)
+                        for block in collapsed
+                        if isinstance(block, int) and not isinstance(block, bool)
+                        and block in editor.fold_regions
+                    }
+                    if editor.collapsed_blocks:
+                        editor._apply_fold_visibility()
+
+                bookmarks = item.get("bookmarks", [])
+                if isinstance(bookmarks, list):
+                    for block in bookmarks:
+                        if isinstance(block, int) and not isinstance(block, bool):
+                            editor.set_bookmark(block, True)
+
+                maximum = max(0, editor.document().characterCount() - 1)
+                position = max(0, min(
+                    maximum,
+                    self._session_int(item.get("cursor_position", 0)),
+                ))
+                anchor = max(0, min(
+                    maximum,
+                    self._session_int(item.get("cursor_anchor", position), position),
+                ))
+                cursor = editor.textCursor()
+                cursor.setPosition(anchor)
+                cursor.setPosition(position, QTextCursor.MoveMode.KeepAnchor)
+                editor.setTextCursor(cursor)
+                editor.verticalScrollBar().setValue(
+                    max(0, self._session_int(item.get("vertical_scroll", 0)))
+                )
+                editor.horizontalScrollBar().setValue(
+                    max(0, self._session_int(item.get("horizontal_scroll", 0)))
+                )
+
+            active = max(0, min(
+                self.tab_bar.count() - 1,
+                self._session_int(payload.get("active_tab", 0)),
+            ))
+            self.tab_bar.setCurrentIndex(active)
+            self.editor_stack.setCurrentIndex(active)
+
+            next_number = payload.get("next_tab_number")
+            if isinstance(next_number, int) and not isinstance(next_number, bool):
+                self.next_tab_number = max(self.next_tab_number, next_number)
+            self._update_tab_count_button()
+            self._refresh_active_status()
+            self._update_fold_button()
+            return True
+        except (TypeError, ValueError, OverflowError):
+            return False
+        finally:
+            self._session_restoring = False
+
     def _button(self, text: str, primary: bool = False) -> QPushButton:
         button = QPushButton(text)
         button.setProperty("primary", primary)
@@ -878,7 +1074,7 @@ class JsonWindow(QMainWindow):
         drag_bar.setMinimumHeight(42)
         title_row = QHBoxLayout(drag_bar)
         title_row.setContentsMargins(20, 6, 18, 4)
-        title = QLabel("JSON Studio")
+        title = QLabel(APP_NAME)
         title.setObjectName("title")
         self.subtitle = QLabel("粘贴、整理和定位 JSON")
         self.subtitle.setObjectName("subtitle")
@@ -1140,6 +1336,9 @@ class JsonWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
         QShortcut(QKeySequence.StandardKey.Find, self, activated=self.open_search)
         QShortcut(QKeySequence("Escape"), self, activated=self.close_search)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(lambda: self._save_session(force=True))
 
     def _create_editor(self) -> JsonEditor:
         editor = JsonEditor(
@@ -1188,6 +1387,7 @@ class JsonWindow(QMainWindow):
         self.editor_stack.setCurrentIndex(index)
         self._update_fold_button()
         editor.setFocus()
+        self._mark_session_dirty()
 
     def switch_tab(self, index: int):
         if 0 <= index < self.editor_stack.count():
@@ -1203,14 +1403,17 @@ class JsonWindow(QMainWindow):
                 self.selection_button.setChecked(False)
                 self.selection_button.blockSignals(False)
                 self.perform_search()
+            self._mark_session_dirty()
 
     def _fold_state_changed(self, editor: JsonEditor):
         if editor is self.editor:
             self._update_fold_button()
+        self._mark_session_dirty()
 
     def _editor_bookmarks_changed(self, editor: JsonEditor):
         if editor is self.editor:
             self._update_bookmark_status()
+        self._mark_session_dirty()
 
     def _update_fold_button(self):
         editor = self.editor
@@ -1288,12 +1491,14 @@ class JsonWindow(QMainWindow):
             self.tab_bar.setTabText(0, f"untitled-{self.next_tab_number}")
             self.next_tab_number += 1
             self._update_tab_count_button()
+            self._mark_session_dirty()
             return
         self.tab_bar.removeTab(index)
         self.editor_stack.removeWidget(editor)
         editor.deleteLater()
         self._update_tab_count_button()
         self.switch_tab(self.tab_bar.currentIndex())
+        self._mark_session_dirty()
 
     def _update_tab_count_button(self):
         count = self.tab_bar.count()
@@ -1329,6 +1534,7 @@ class JsonWindow(QMainWindow):
         self.editor_stack.removeWidget(editor)
         self.editor_stack.insertWidget(new_index, editor)
         self.editor_stack.setCurrentIndex(new_index)
+        self._mark_session_dirty()
 
     def rename_tab(self, index: int):
         if index < 0:
@@ -1343,6 +1549,7 @@ class JsonWindow(QMainWindow):
         title = title.strip()
         if accepted and title:
             self.tab_bar.setTabText(index, title)
+            self._mark_session_dirty()
 
     def show_tab_context_menu(self, position: QPoint):
         index = self.tab_bar.tabAt(position)
@@ -1384,9 +1591,9 @@ class JsonWindow(QMainWindow):
 
     def show_about(self):
         box = QMessageBox(self)
-        box.setWindowTitle(self.tr("关于 JSON Studio", "About JSON Studio"))
+        box.setWindowTitle(self.tr(f"关于 {APP_NAME}", f"About {APP_NAME}"))
         box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"JSON Studio {APP_VERSION}")
+        box.setText(f"{APP_NAME} {APP_VERSION}")
         box.setInformativeText(self.tr(
             "当前 Python 版本：{version}\n\n本地 JSON 格式化、转换与路径定位工具"
             "\n\nPowered by Stone Wang",
@@ -1399,8 +1606,8 @@ class JsonWindow(QMainWindow):
     def _confirm_exit(self) -> bool:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle(self.tr("退出 JSON Studio", "Exit JSON Studio"))
-        box.setText(self.tr("确定要退出 JSON Studio 吗？", "Exit JSON Studio?"))
+        box.setWindowTitle(self.tr(f"退出 {APP_NAME}", f"Exit {APP_NAME}"))
+        box.setText(self.tr(f"确定要退出 {APP_NAME} 吗？", f"Exit {APP_NAME}?"))
         cancel_button = box.addButton(self.tr("取消", "Cancel"), QMessageBox.ButtonRole.RejectRole)
         exit_button = box.addButton(self.tr("退出", "Exit"), QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(cancel_button)
@@ -1410,6 +1617,8 @@ class JsonWindow(QMainWindow):
 
     def closeEvent(self, event):
         if not setting_as_bool(self.settings, "confirm_exit", True) or self._confirm_exit():
+            self._session_save_timer.stop()
+            self._save_session(force=True)
             event.accept()
         else:
             event.ignore()
@@ -1703,6 +1912,7 @@ class JsonWindow(QMainWindow):
         return box.clickedButton() is continue_button
 
     def _editor_text_changed(self, editor: QPlainTextEdit):
+        self._mark_session_dirty()
         text = editor.toPlainText()
         if not text:
             editor.json_current_value = None
@@ -1724,6 +1934,7 @@ class JsonWindow(QMainWindow):
                 self.perform_search()
 
     def _editor_cursor_changed(self, editor: QPlainTextEdit):
+        self._mark_session_dirty()
         if editor is self.editor:
             self.update_path()
             self._update_bookmark_status()
@@ -2044,7 +2255,7 @@ class JsonWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("JSON Studio")
+    app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
     window = JsonWindow()
     window.show()

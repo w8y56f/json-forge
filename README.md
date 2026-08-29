@@ -1,9 +1,9 @@
-# JSON Studio
+# JSON Forge
 
 版本：v1.0.0
 
 一个使用 Python + PySide6 编写的本地 JSON 桌面工具。项目目录名为
-`json-viewer-venus`。
+`json-forge`。
 
 ## 功能
 
@@ -23,6 +23,7 @@
 - 编辑器默认显示行号，可在 General 中关闭；对象与数组支持点击 gutter 箭头折叠/展开
 - 工具栏“折叠/展开”按钮可一次收起或展开当前标签的全部节点
 - 支持按 Tab 独立设置行书签：点击行号区书签栏或使用 `Ctrl/Cmd + F2` 切换，`F2` / `Shift + F2` 循环跳转
+- 退出后自动恢复上次会话：Tab 内容、标题、当前 Tab、光标、滚动位置、折叠状态和书签保存在 `cache/session.json`
 - `Ctrl/Cmd + F` 浮动搜索，支持大小写、Whole Word、选区搜索、属性名/属性值范围和匹配导航
 - 光标位于 `{}`、`[]` 或 `()` 任一端时，以红色同步高亮对应符号，并忽略字符串内括号
 
@@ -40,7 +41,7 @@ python3 -m venv .venv
 .venv/bin/python app.py
 ```
 
-用户配置默认保存在程序目录下的 `config/settings.ini`，因此复制或迁移整个项目目录时会一并带走配置。如果程序目录没有写权限，将自动回退到系统配置存储。
+用户配置默认保存在程序目录下的 `config/settings.ini`，会话快照保存在 `cache/session.json`；因此复制或迁移整个项目目录时会一并带走配置和上次会话。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。如果程序目录没有写权限，设置会自动回退到系统配置存储，会话文件则会在可写位置保存失败时保持原有文件不变。
 
 常用快捷键：`Ctrl/Cmd + Enter` 格式化，`Ctrl/Cmd + Shift + M` 紧凑压缩，
 `Ctrl/Cmd + T` 新建标签，`Ctrl/Cmd + W` 关闭当前标签。
