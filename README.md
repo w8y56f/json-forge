@@ -45,6 +45,29 @@ python3 -m venv .venv
 
 ## 制作免安装 Python 的发布包
 
+### macOS `.app`
+
+在 Mac 上可生成 Finder 中直接双击运行的原生应用包（产物架构与构建机器一致）：
+
+```bash
+.venv/bin/python -m pip install pyinstaller
+.venv/bin/python packaging/build_macos_app.py --clean
+open "dist/JSON Forge.app"
+```
+
+如果 `.venv` 是由 `uv` 创建且没有 `pip`，第一条命令改为：
+
+```bash
+uv pip install --python .venv/bin/python pyinstaller
+```
+
+生成文件位于 `dist/JSON Forge.app`。应用内置 Python 和 PySide6，目标 Mac 无需安装
+Python。未使用 Apple Developer ID 签名的本地构建采用 ad-hoc 签名；复制到其他 Mac
+后若被 Gatekeeper 阻止，可在 Finder 中右键应用并选择“打开”。打包版的设置与会话存放在
+`~/Library/Application Support/JSON Forge/`。
+
+### 便携目录
+
 发布包会把独立 Python 运行时和 PySide6 一起放进目录，因此目标电脑不需要预先安装 Python。目录内的 `start.sh`（macOS）和 `start.bat`（Windows）会自动调用随包附带的运行时。
 
 在 macOS Apple Silicon 上制作发布包：
@@ -59,6 +82,17 @@ python3 -m venv .venv
 python packaging/build_release.py --target macos-x86_64
 python packaging/build_release.py --target windows-x86_64
 ```
+
+已有 Windows 便携 ZIP 后，也可以在安装了 Go 的 macOS、Linux 或 Windows 上把它封装成
+单个自解压 GUI 程序：
+
+```bash
+.venv/bin/python packaging/build_windows_exe.py
+```
+
+产物为 `dist/JSON Forge-Windows-x86_64.exe`。它首次运行时会把内置运行环境解压至
+`%LOCALAPPDATA%\JSON Forge\runtime-v1.0.0`，用户设置和会话保存在
+`%APPDATA%\JSON Forge`。该本地构建没有商业代码签名，Windows SmartScreen 可能显示提示。
 
 生成的目录和压缩包会放在 `dist/`（macOS 为 `.tar.gz`，Windows 为 `.zip`，可直接用资源管理器解压）。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
 

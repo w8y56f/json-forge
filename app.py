@@ -38,11 +38,29 @@ SETTINGS_APPLICATION = APP_NAME
 LEGACY_SETTINGS_APPLICATION = "JSON Studio"
 
 
+def is_bundled_app() -> bool:
+    """Return whether the process is running from a packaged application."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def bundled_resource_path(*parts: str) -> Path:
+    """Return a bundled read-only resource path in development or PyInstaller."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
+
+def application_data_path(*parts: str) -> Path:
+    """Return the per-user writable data directory used by the macOS app."""
+    return Path.home() / "Library" / "Application Support" / APP_NAME / Path(*parts)
+
+
 def settings_file_path() -> Path:
     """Return the portable settings path next to the application source."""
     override = os.environ.get("JSON_STUDIO_SETTINGS_PATH")
     if override:
         return Path(override).expanduser().resolve()
+    if is_bundled_app() and sys.platform == "darwin":
+        return application_data_path("config", "settings.ini")
     return Path(__file__).resolve().parent / "config" / "settings.ini"
 
 
@@ -51,6 +69,8 @@ def default_settings_file_path() -> Path:
     override = os.environ.get("JSON_STUDIO_DEFAULT_SETTINGS_PATH")
     if override:
         return Path(override).expanduser().resolve()
+    if is_bundled_app():
+        return bundled_resource_path("config", "settings.default.ini")
     return Path(__file__).resolve().parent / "config" / "settings.default.ini"
 
 
@@ -99,6 +119,8 @@ def session_file_path() -> Path:
     override = os.environ.get("JSON_STUDIO_SESSION_PATH")
     if override:
         return Path(override).expanduser().resolve()
+    if is_bundled_app() and sys.platform == "darwin":
+        return application_data_path("cache", "session.json")
     return Path(__file__).resolve().parent / "cache" / "session.json"
 
 
@@ -107,6 +129,8 @@ def instance_lock_path() -> Path:
     override = os.environ.get("JSON_STUDIO_INSTANCE_LOCK_PATH")
     if override:
         return Path(override).expanduser().resolve()
+    if is_bundled_app() and sys.platform == "darwin":
+        return application_data_path("cache", "json-forge.lock")
     return Path(__file__).resolve().parent / "cache" / "json-forge.lock"
 
 
