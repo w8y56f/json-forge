@@ -14,11 +14,39 @@ from app import (
     JsonEditor,
     JsonWindow,
     MoreSettingsDialog,
+    acquire_instance_lock,
     create_app_settings,
+    instance_lock_path,
     platform_shortcut_hint,
     session_file_path,
     settings_file_path,
 )
+
+
+class InstanceLockTests(unittest.TestCase):
+    def test_second_lock_is_rejected_until_first_is_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.environ.get("JSON_STUDIO_INSTANCE_LOCK_PATH")
+            os.environ["JSON_STUDIO_INSTANCE_LOCK_PATH"] = os.path.join(directory, "json-forge.lock")
+            first = second = None
+            try:
+                first, already_running = acquire_instance_lock()
+                self.assertIsNotNone(first)
+                self.assertFalse(already_running)
+                self.assertEqual(instance_lock_path(), Path(os.environ["JSON_STUDIO_INSTANCE_LOCK_PATH"]).resolve())
+
+                second, already_running = acquire_instance_lock()
+                self.assertIsNone(second)
+                self.assertTrue(already_running)
+            finally:
+                if first is not None:
+                    first.unlock()
+                if second is not None:
+                    second.unlock()
+                if previous is None:
+                    os.environ.pop("JSON_STUDIO_INSTANCE_LOCK_PATH", None)
+                else:
+                    os.environ["JSON_STUDIO_INSTANCE_LOCK_PATH"] = previous
 
 
 class SettingsStorageTests(unittest.TestCase):
@@ -184,8 +212,11 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(dialog.language_combo.currentData(), "en")
         self.assertEqual(dialog.windowTitle(), "More Settings")
         self.assertEqual(dialog.brace_guides_checkbox.text(), "Closing Brace Guide")
+        self.assertTrue(dialog.single_instance_checkbox.isChecked())
+        dialog.single_instance_checkbox.setChecked(False)
         dialog.brace_guides_checkbox.setChecked(False)
         dialog.accept()
+        self.assertFalse(self.window.settings.value("single_instance", True, type=bool))
         self.assertFalse(self.window.settings.value("brace_guides", True, type=bool))
         self.window.editor.set_brace_guides_visible(False)
         self.assertEqual(self.window.editor._brace_guide_segments(), [])

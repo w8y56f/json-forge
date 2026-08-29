@@ -8,7 +8,10 @@ import json
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRegularExpression, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent, QLockFile, QPoint, QRect, QRegularExpression, QSettings, QSize,
+    Qt, QTimer, Signal,
+)
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
     QPixmap, QPolygon, QShortcut, QTextBlockUserData, QTextCharFormat, QTextCursor,
@@ -49,6 +52,34 @@ def session_file_path() -> Path:
     if override:
         return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parent / "cache" / "session.json"
+
+
+def instance_lock_path() -> Path:
+    """Return the lock path used to enforce the single-instance setting."""
+    override = os.environ.get("JSON_STUDIO_INSTANCE_LOCK_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent / "cache" / "json-forge.lock"
+
+
+def acquire_instance_lock() -> tuple[QLockFile | None, bool]:
+    """Try to acquire the process lock.
+
+    Returns ``(lock, True)`` when another instance owns the lock. If the lock
+    cannot be created because the directory is not writable, returns
+    ``(None, False)`` so the application can still start.
+    """
+    path = instance_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = QLockFile(str(path))
+        if lock.tryLock(0):
+            return lock, False
+        if lock.error() == QLockFile.LockError.LockFailedError:
+            return None, True
+    except (OSError, RuntimeError):
+        pass
+    return None, False
 
 
 def _legacy_settings() -> QSettings:
@@ -230,6 +261,11 @@ class MoreSettingsDialog(QDialog):
         self.confirm_exit_checkbox = QCheckBox(tr("退出程序时提示确认", "Confirm before exiting"))
         self.confirm_exit_checkbox.setChecked(setting_as_bool(settings, "confirm_exit", True))
         general_layout.addWidget(self.confirm_exit_checkbox)
+        self.single_instance_checkbox = QCheckBox(
+            tr("禁止多实例（仅允许打开一个窗口）", "Prevent multiple instances (allow one window)")
+        )
+        self.single_instance_checkbox.setChecked(setting_as_bool(settings, "single_instance", True))
+        general_layout.addWidget(self.single_instance_checkbox)
         self.brace_guides_checkbox = QCheckBox(tr("收尾连接虚线", "Closing Brace Guide"))
         self.brace_guides_checkbox.setChecked(setting_as_bool(settings, "brace_guides", True))
         general_layout.addWidget(self.brace_guides_checkbox)
@@ -249,6 +285,7 @@ class MoreSettingsDialog(QDialog):
         self.settings.setValue("show_line_numbers", self.line_numbers_checkbox.isChecked())
         self.settings.setValue("tab_style", self.tab_style_combo.currentData())
         self.settings.setValue("language", self.language_combo.currentData())
+        self.settings.setValue("single_instance", self.single_instance_checkbox.isChecked())
         self.settings.setValue("brace_guides", self.brace_guides_checkbox.isChecked())
         self.settings.sync()
         super().accept()
@@ -2257,7 +2294,25 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
+    startup_settings = create_app_settings()
+    instance_lock = None
+    if setting_as_bool(startup_settings, "single_instance", True):
+        instance_lock, already_running = acquire_instance_lock()
+        if already_running:
+            language = startup_settings.value("language", "zh_CN")
+            QMessageBox.information(
+                None,
+                APP_NAME,
+                localized(
+                    language,
+                    f"{APP_NAME} 已经在运行中。",
+                    f"{APP_NAME} is already running.",
+                ),
+            )
+            return 0
     window = JsonWindow()
+    # Keep the QLockFile alive for the full lifetime of the process.
+    window._instance_lock = instance_lock
     window.show()
     sys.exit(app.exec())
 
