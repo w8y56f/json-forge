@@ -168,6 +168,9 @@ class MoreSettingsDialog(QDialog):
         self.confirm_exit_checkbox = QCheckBox(tr("退出程序时提示确认", "Confirm before exiting"))
         self.confirm_exit_checkbox.setChecked(setting_as_bool(settings, "confirm_exit", True))
         general_layout.addWidget(self.confirm_exit_checkbox)
+        self.brace_guides_checkbox = QCheckBox(tr("收尾连接虚线", "Closing Brace Guide"))
+        self.brace_guides_checkbox.setChecked(setting_as_bool(settings, "brace_guides", True))
+        general_layout.addWidget(self.brace_guides_checkbox)
         general_layout.addStretch()
         tabs.addTab(general, "General")
         layout.addWidget(tabs)
@@ -184,6 +187,7 @@ class MoreSettingsDialog(QDialog):
         self.settings.setValue("show_line_numbers", self.line_numbers_checkbox.isChecked())
         self.settings.setValue("tab_style", self.tab_style_combo.currentData())
         self.settings.setValue("language", self.language_combo.currentData())
+        self.settings.setValue("brace_guides", self.brace_guides_checkbox.isChecked())
         self.settings.sync()
         super().accept()
 
@@ -259,6 +263,7 @@ class JsonEditor(QPlainTextEdit):
         super().__init__(parent)
         self.show_line_numbers = show_line_numbers
         self.editor_theme = theme
+        self.brace_guides_visible = True
         self.fold_regions: dict[int, int] = {}
         self.collapsed_blocks: set[int] = set()
         self.brace_pairs: dict[int, int] = {}
@@ -282,6 +287,10 @@ class JsonEditor(QPlainTextEdit):
         self.gutter.update()
         self._update_brace_highlight()
 
+    def set_brace_guides_visible(self, visible: bool):
+        self.brace_guides_visible = visible
+        self.viewport().update()
+
     def gutter_width(self) -> int:
         number_width = 0
         if self.show_line_numbers:
@@ -304,6 +313,62 @@ class JsonEditor(QPlainTextEdit):
         super().resizeEvent(event)
         contents = self.contentsRect()
         self.gutter.setGeometry(QRect(contents.left(), contents.top(), self.gutter_width(), contents.height()))
+
+    def _brace_guide_segments(self):
+        """Return visible cross-line brace guides as (x1, y1, x2, y2, color)."""
+        if not self.brace_guides_visible:
+            return []
+        guides = []
+        guide_color = "#64748B" if self.editor_theme == "light" else "#38BDF8"
+        active_color = "#EF4444"
+        for opening, closing in sorted(
+            (opening, closing)
+            for opening, closing in self.brace_pairs.items()
+            if opening < closing
+        ):
+            opening_block = self.document().findBlock(opening)
+            closing_block = self.document().findBlock(closing)
+            if (
+                not opening_block.isValid()
+                or not closing_block.isValid()
+                or opening_block.blockNumber() == closing_block.blockNumber()
+                or not opening_block.isVisible()
+                or not closing_block.isVisible()
+            ):
+                continue
+            opening_cursor = QTextCursor(self.document())
+            opening_cursor.setPosition(opening)
+            closing_cursor = QTextCursor(self.document())
+            closing_cursor.setPosition(closing)
+            opening_rect = self.cursorRect(opening_cursor)
+            closing_rect = self.cursorRect(closing_cursor)
+            if max(opening_rect.bottom(), closing_rect.bottom()) < 0 or min(
+                opening_rect.top(), closing_rect.top()
+            ) > self.viewport().height():
+                continue
+            x1 = max(1, opening_rect.left() - 4)
+            x2 = max(1, closing_rect.left() - 4)
+            y1 = opening_rect.center().y()
+            y2 = closing_rect.center().y()
+            color = active_color if {opening, closing} == self.highlighted_brace_positions else guide_color
+            guides.append((x1, y1, x2, y2, color))
+        return guides
+
+    def paintEvent(self, event):
+        # Draw guides first so the editor text remains crisp above them.
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        for x1, y1, x2, y2, color in self._brace_guide_segments():
+            pen = QPen(QColor(color), 1, Qt.PenStyle.DashLine)
+            pen.setDashPattern([2, 3])
+            painter.setPen(pen)
+            # Align the guide with the closing bracket's column. Formatted
+            # JSON places opening braces after a property name, while closing
+            # braces return to the parent indentation level; no horizontal
+            # segment is drawn back to the opening brace.
+            painter.drawLine(x2, y1, x2, y2)
+        painter.end()
+        super().paintEvent(event)
 
     def paint_gutter(self, event):
         painter = QPainter(self.gutter)
@@ -562,6 +627,7 @@ class JsonEditor(QPlainTextEdit):
             selections.append(selection)
         self.brace_extra_selections = selections
         self._apply_decorations()
+        self.viewport().update()
 
     def toggle_fold(self, start_block: int):
         if start_block not in self.fold_regions:
@@ -956,6 +1022,7 @@ class JsonWindow(QMainWindow):
             self.theme,
             setting_as_bool(self.settings, "show_line_numbers", True),
         )
+        editor.set_brace_guides_visible(setting_as_bool(self.settings, "brace_guides", True))
         editor.setObjectName("editor")
         editor.setPlaceholderText(self.tr(
             '在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容',
@@ -1141,6 +1208,9 @@ class JsonWindow(QMainWindow):
         dialog = MoreSettingsDialog(self.settings, self.language, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.apply_language(self.settings.value("language", "zh_CN"))
+            brace_guides_visible = setting_as_bool(self.settings, "brace_guides", True)
+            for index in range(self.editor_stack.count()):
+                self.editor_stack.widget(index).set_brace_guides_visible(brace_guides_visible)
             self.apply_theme(self.theme)
 
     def show_about(self):

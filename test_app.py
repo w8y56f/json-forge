@@ -58,6 +58,7 @@ class LanguageUiTests(unittest.TestCase):
 
     def test_language_switch_updates_buttons_hover_and_status(self):
         self.assertEqual(self.window.theme, "light")
+        self.assertTrue(self.window.editor.brace_guides_visible)
         self.window.apply_language("en")
         self.assertEqual(self.window.compact_button.text(), "Minify JSON")
         self.assertEqual(self.window.tab_bar.rename_hint, "Double-click the tab title to rename")
@@ -94,6 +95,12 @@ class LanguageUiTests(unittest.TestCase):
         dialog = MoreSettingsDialog(self.window.settings, "en", self.window)
         self.assertEqual(dialog.language_combo.currentData(), "en")
         self.assertEqual(dialog.windowTitle(), "More Settings")
+        self.assertEqual(dialog.brace_guides_checkbox.text(), "Closing Brace Guide")
+        dialog.brace_guides_checkbox.setChecked(False)
+        dialog.accept()
+        self.assertFalse(self.window.settings.value("brace_guides", True, type=bool))
+        self.window.editor.set_brace_guides_visible(False)
+        self.assertEqual(self.window.editor._brace_guide_segments(), [])
         dialog.deleteLater()
 
     def test_json_errors_are_localized_in_english(self):
@@ -243,6 +250,32 @@ class BraceMatchingTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertEqual(self.editor.textCursor().selectedText(), "1, 2, 3")
+
+    def test_brace_guides_are_gray_by_default_and_red_when_active(self):
+        text = '{\n  "items": [\n    1\n  ]\n}'
+        self.editor.resize(600, 300)
+        self.editor.show()
+        self.editor.setPlainText(text)
+        self.app.processEvents()
+        opening = text.index("{")
+        guides = self.editor._brace_guide_segments()
+        self.assertTrue(any(color == "#64748B" for _, _, _, _, color in guides))
+
+        cursor = self.editor.textCursor()
+        cursor.setPosition(opening + 1)
+        self.editor.setTextCursor(cursor)
+        self.app.processEvents()
+        active_guides = self.editor._brace_guide_segments()
+        self.assertTrue(any(color == "#EF4444" for _, _, _, _, color in active_guides))
+
+    def test_dark_brace_guides_use_cyan_for_inactive_pairs(self):
+        self.editor.set_editor_theme("dark")
+        self.editor.setPlainText('{\n  "items": [1]\n}')
+        cursor = self.editor.textCursor()
+        cursor.setPosition(2)
+        self.editor.setTextCursor(cursor)
+        self.app.processEvents()
+        self.assertTrue(any(color == "#38BDF8" for _, _, _, _, color in self.editor._brace_guide_segments()))
 
 
 if __name__ == "__main__":
