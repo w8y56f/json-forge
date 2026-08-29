@@ -3,15 +3,16 @@ from __future__ import annotations
 import sys
 import platform
 
-from PySide6.QtCore import QRegularExpression, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QRegularExpression, QSettings, Qt, QTimer
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QKeySequence, QShortcut,
     QTextCharFormat, QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QMenu, QSizePolicy, QStackedWidget, QStatusBar,
-    QTabBar, QToolButton, QVBoxLayout, QWidget, QPlainTextEdit,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QFrame, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QMenu, QSizePolicy, QStackedWidget, QStatusBar, QTabBar,
+    QTabWidget, QToolButton, QToolTip, QVBoxLayout, QWidget, QPlainTextEdit,
 )
 
 from json_tools import JsonToolError, parse_json_like, path_at_position, render_json, value_stats
@@ -30,6 +31,87 @@ class DragBar(QFrame):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+
+class DocumentTabBar(QTabBar):
+    """Tab bar whose hover hint reveals a title only when it is elided."""
+
+    rename_hint = "双击标签标题可重命名"
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        callback = getattr(self, "overflow_callback", None)
+        if callback is not None:
+            QTimer.singleShot(0, callback)
+
+    def tooltip_text(self, index: int) -> str:
+        if index < 0 or index >= self.count():
+            return ""
+        title = self.tabText(index)
+        available = self.tabRect(index).width() - 24  # horizontal text padding
+        for position in (QTabBar.ButtonPosition.LeftSide, QTabBar.ButtonPosition.RightSide):
+            button = self.tabButton(index, position)
+            if button is not None and button.isVisible():
+                available -= button.sizeHint().width() + 4
+        rendered = self.fontMetrics().elidedText(title, self.elideMode(), max(1, available))
+        return title if rendered != title else self.rename_hint
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            index = self.tabAt(event.pos())
+            if index >= 0:
+                QToolTip.showText(event.globalPos(), self.tooltip_text(index), self, self.tabRect(index))
+                return True
+        return super().event(event)
+
+
+def setting_as_bool(settings: QSettings, key: str, default: bool) -> bool:
+    value = settings.value(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+class MoreSettingsDialog(QDialog):
+    def __init__(self, settings: QSettings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("更多设置")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        general = QWidget()
+        general_layout = QVBoxLayout(general)
+        general_layout.setContentsMargins(18, 18, 18, 18)
+        form = QFormLayout()
+        self.tab_style_combo = QComboBox()
+        self.tab_style_combo.addItem("实用模式", "practical")
+        self.tab_style_combo.addItem("扁平模式", "flat")
+        saved_tab_style = settings.value("tab_style", "practical")
+        selected_index = self.tab_style_combo.findData(saved_tab_style)
+        self.tab_style_combo.setCurrentIndex(max(0, selected_index))
+        form.addRow("Tab样式：", self.tab_style_combo)
+        general_layout.addLayout(form)
+        self.confirm_exit_checkbox = QCheckBox("退出程序时提示确认")
+        self.confirm_exit_checkbox.setChecked(setting_as_bool(settings, "confirm_exit", True))
+        general_layout.addWidget(self.confirm_exit_checkbox)
+        general_layout.addStretch()
+        tabs.addTab(general, "General")
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("保存", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        self.settings.setValue("confirm_exit", self.confirm_exit_checkbox.isChecked())
+        self.settings.setValue("tab_style", self.tab_style_combo.currentData())
+        self.settings.sync()
+        super().accept()
 
 
 class JsonHighlighter(QSyntaxHighlighter):
@@ -173,6 +255,8 @@ class JsonWindow(QMainWindow):
         self.theme_menu.addSection("外观")
         self.theme_menu.addActions((self.light_action, self.dark_action))
         self.theme_menu.addSeparator()
+        self.more_settings_action = QAction("更多设置", self)
+        self.theme_menu.addAction(self.more_settings_action)
         self.about_action = QAction("关于", self)
         self.theme_menu.addAction(self.about_action)
         self.settings_button.setMenu(self.theme_menu)
@@ -184,19 +268,34 @@ class JsonWindow(QMainWindow):
         tab_row = QHBoxLayout(tab_row_widget)
         tab_row.setContentsMargins(20, 4, 20, 5)
         tab_row.setSpacing(5)
-        self.tab_bar = QTabBar()
+        self.tab_bar = DocumentTabBar()
         self.tab_bar.setObjectName("documentTabs")
         self.tab_bar.setMovable(True)
         self.tab_bar.setTabsClosable(True)
         self.tab_bar.setExpanding(False)
         self.tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
-        self.tab_bar.setUsesScrollButtons(True)
+        self.tab_bar.setUsesScrollButtons(False)
         self.tab_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.tab_bar.overflow_callback = self._update_tab_navigation
+        self.tab_left_button = QToolButton()
+        self.tab_left_button.setObjectName("tabScrollLeft")
+        self.tab_left_button.setText("<")
+        self.tab_left_button.setToolTip("向左浏览标签")
+        self.tab_left_button.setAccessibleName("向左浏览标签")
+        self.tab_right_button = QToolButton()
+        self.tab_right_button.setObjectName("tabScrollRight")
+        self.tab_right_button.setText(">")
+        self.tab_right_button.setToolTip("向右浏览标签")
+        self.tab_right_button.setAccessibleName("向右浏览标签")
+        self.tab_left_button.hide()
+        self.tab_right_button.hide()
         self.add_tab_button = QToolButton()
         self.add_tab_button.setObjectName("addTab")
-        self.add_tab_button.setText("+")
+        self.add_tab_button.setText("+(0)")
         self.add_tab_button.setToolTip("新建标签页")
         tab_row.addWidget(self.tab_bar)
+        tab_row.addWidget(self.tab_left_button)
+        tab_row.addWidget(self.tab_right_button)
         tab_row.addWidget(self.add_tab_button)
         tab_row.addStretch()
         layout.addWidget(tab_row_widget)
@@ -273,7 +372,10 @@ class JsonWindow(QMainWindow):
         self.dark_action.triggered.connect(lambda: self.apply_theme("dark"))
         self.light_action.triggered.connect(lambda: self.apply_theme("light"))
         self.about_action.triggered.connect(self.show_about)
+        self.more_settings_action.triggered.connect(self.show_more_settings)
         self.add_tab_button.clicked.connect(self.add_tab)
+        self.tab_left_button.clicked.connect(lambda: self.navigate_tab(-1))
+        self.tab_right_button.clicked.connect(lambda: self.navigate_tab(1))
         self.tab_bar.currentChanged.connect(self.switch_tab)
         self.tab_bar.tabCloseRequested.connect(self.close_tab)
         self.tab_bar.tabBarDoubleClicked.connect(self.rename_tab)
@@ -308,8 +410,8 @@ class JsonWindow(QMainWindow):
         title = f"untitled-{self.next_tab_number}"
         self.next_tab_number += 1
         index = self.tab_bar.addTab(title)
-        self.tab_bar.setTabToolTip(index, "双击标签标题可重命名")
         self.editor_stack.insertWidget(index, editor)
+        self._update_tab_count_button()
         self.tab_bar.setCurrentIndex(index)
         self.editor_stack.setCurrentIndex(index)
         editor.setFocus()
@@ -318,20 +420,50 @@ class JsonWindow(QMainWindow):
         if 0 <= index < self.editor_stack.count():
             self.editor_stack.setCurrentIndex(index)
             self._refresh_active_status()
+            self._update_tab_navigation()
 
     def close_tab(self, index: int):
         if index < 0:
             return
+        editor = self.editor_stack.widget(index)
+        if editor is None:
+            return
+        if editor.toPlainText() and not self._confirm_close_tab(self.tab_bar.tabText(index)):
+            return
         if self.tab_bar.count() == 1:
-            self.editor.clear()
+            editor.clear()
             self.tab_bar.setTabText(0, f"untitled-{self.next_tab_number}")
             self.next_tab_number += 1
+            self._update_tab_count_button()
             return
-        editor = self.editor_stack.widget(index)
         self.tab_bar.removeTab(index)
         self.editor_stack.removeWidget(editor)
         editor.deleteLater()
+        self._update_tab_count_button()
         self.switch_tab(self.tab_bar.currentIndex())
+
+    def _update_tab_count_button(self):
+        count = self.tab_bar.count()
+        self.add_tab_button.setText(f"+({count})")
+        self.add_tab_button.setToolTip(f"新建标签页（当前 {count} 个）")
+        QTimer.singleShot(0, self._update_tab_navigation)
+
+    def _update_tab_navigation(self):
+        if not hasattr(self, "tab_bar"):
+            return
+        total_width = sum(self.tab_bar.tabSizeHint(index).width() for index in range(self.tab_bar.count()))
+        overflow = total_width > self.tab_bar.width()
+        self.tab_left_button.setVisible(overflow)
+        self.tab_right_button.setVisible(overflow)
+        current = self.tab_bar.currentIndex()
+        self.tab_left_button.setEnabled(current > 0)
+        self.tab_right_button.setEnabled(0 <= current < self.tab_bar.count() - 1)
+
+    def navigate_tab(self, offset: int):
+        target = self.tab_bar.currentIndex() + offset
+        if 0 <= target < self.tab_bar.count():
+            self.tab_bar.setCurrentIndex(target)
+        self._update_tab_navigation()
 
     def move_tab(self, old_index: int, new_index: int):
         editor = self.editor_stack.widget(old_index)
@@ -350,6 +482,24 @@ class JsonWindow(QMainWindow):
         if accepted and title:
             self.tab_bar.setTabText(index, title)
 
+    def _confirm_close_tab(self, title: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("关闭标签")
+        box.setText(f"确定要关闭“{title}”吗？")
+        box.setInformativeText("该标签中有内容，关闭后内容将丢失。")
+        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        close_button = box.addButton("关闭", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        return box.clickedButton() is close_button
+
+    def show_more_settings(self):
+        dialog = MoreSettingsDialog(self.settings, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_theme(self.theme)
+
     def show_about(self):
         box = QMessageBox(self)
         box.setWindowTitle("关于 JSON Studio")
@@ -357,6 +507,24 @@ class JsonWindow(QMainWindow):
         box.setText(f"JSON Studio {APP_VERSION}")
         box.setInformativeText(f"当前 Python 版本：{platform.python_version()}\n\n本地 JSON 格式化、转换与路径定位工具")
         box.exec()
+
+    def _confirm_exit(self) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("退出 JSON Studio")
+        box.setText("确定要退出 JSON Studio 吗？")
+        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        exit_button = box.addButton("退出", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        return box.clickedButton() is exit_button
+
+    def closeEvent(self, event):
+        if not setting_as_bool(self.settings, "confirm_exit", True) or self._confirm_exit():
+            event.accept()
+        else:
+            event.ignore()
 
     def paste(self):
         text = QApplication.clipboard().text()
@@ -493,13 +661,25 @@ class JsonWindow(QMainWindow):
                 QLabel#hint[error="true"] { color: #BE123C; }
                 QFrame#dragBar, QFrame#tabRow { background: #E8EEF6; border: none; }
                 QTabBar::tab {
-                    background: #E2E8F0; color: #475569; border: 1px solid #CBD5E1;
-                    border-bottom: none; border-top-left-radius: 8px; border-top-right-radius: 8px;
-                    min-width: 105px; max-width: 180px; padding: 7px 12px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                stop:0 #FFFFFF, stop:1 #D9E1EB);
+                    color: #475569;
+                    border-top: 1px solid #FFFFFF; border-left: 1px solid #FFFFFF;
+                    border-right: 2px solid #9AA9BB; border-bottom: 2px solid #9AA9BB;
+                    border-radius: 6px; min-width: 105px; max-width: 180px;
+                    padding: 7px 12px; margin-top: 0px; margin-bottom: 3px;
                 }
-                QTabBar::tab:selected { background: #FFFFFF; color: #0F172A; }
-                QTabBar::tab:hover:!selected { background: #D5DEE9; }
-                QToolButton#addTab { font-size: 18px; padding: 2px 9px; }
+                QTabBar::tab:selected {
+                    background: #D3DCE7; color: #0F172A;
+                    border-top: 2px solid #8797AA; border-left: 2px solid #8797AA;
+                    border-right: 1px solid #F8FAFC; border-bottom: 1px solid #F8FAFC;
+                    padding-top: 8px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 0px;
+                }
+                QTabBar::tab:hover:!selected { background: #F1F5F9; color: #1E293B; }
+                QToolButton#addTab { font-size: 16px; padding: 2px 9px; min-width: 44px; }
+                QToolButton#tabScrollLeft, QToolButton#tabScrollRight {
+                    font-size: 15px; font-weight: 700; padding: 2px 7px; min-width: 20px;
+                }
                 QFrame#toolbar { background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; }
                 QPushButton, QToolButton {
                     background: #F8FAFC; color: #334155; border: 1px solid #CBD5E1;
@@ -525,6 +705,7 @@ class JsonWindow(QMainWindow):
                 QScrollBar:vertical { background: #F1F5F9; width: 11px; }
                 QScrollBar::handle:vertical { background: #CBD5E1; border-radius: 5px; min-height: 24px; }
             """)
+            self._apply_tab_style_override(theme)
             return
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #0B1120; color: #DDE7F3; }
@@ -534,13 +715,25 @@ class JsonWindow(QMainWindow):
             QLabel#hint[error="true"] { color: #FDA4AF; }
             QFrame#dragBar, QFrame#tabRow { background: #0F192B; border: none; }
             QTabBar::tab {
-                background: #17243A; color: #91A2B8; border: 1px solid #2B3A54;
-                border-bottom: none; border-top-left-radius: 8px; border-top-right-radius: 8px;
-                min-width: 105px; max-width: 180px; padding: 7px 12px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #2A3A52, stop:1 #17243A);
+                color: #C0CCDC;
+                border-top: 1px solid #53657E; border-left: 1px solid #53657E;
+                border-right: 2px solid #070C15; border-bottom: 2px solid #070C15;
+                border-radius: 6px; min-width: 105px; max-width: 180px;
+                padding: 7px 12px; margin-top: 0px; margin-bottom: 3px;
             }
-            QTabBar::tab:selected { background: #0E1728; color: #F8FAFC; }
-            QTabBar::tab:hover:!selected { background: #21314B; }
-            QToolButton#addTab { font-size: 18px; padding: 2px 9px; }
+            QTabBar::tab:selected {
+                background: #0A1220; color: #F8FAFC;
+                border-top: 2px solid #05080F; border-left: 2px solid #05080F;
+                border-right: 1px solid #40506A; border-bottom: 1px solid #40506A;
+                padding-top: 8px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 0px;
+            }
+            QTabBar::tab:hover:!selected { background: #30415A; color: #F1F5F9; }
+            QToolButton#addTab { font-size: 16px; padding: 2px 9px; min-width: 44px; }
+            QToolButton#tabScrollLeft, QToolButton#tabScrollRight {
+                font-size: 15px; font-weight: 700; padding: 2px 7px; min-width: 20px;
+            }
             QFrame#toolbar { background: #111B2E; border: 1px solid #243149; border-radius: 10px; }
             QPushButton, QToolButton {
                 background: #17243A; color: #C9D5E5; border: 1px solid #2B3A54;
@@ -565,6 +758,42 @@ class JsonWindow(QMainWindow):
             QScrollBar:vertical { background: #0E1728; width: 11px; }
             QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 24px; }
         """)
+        self._apply_tab_style_override(theme)
+
+    def _apply_tab_style_override(self, theme: str):
+        tab_style = self.settings.value("tab_style", "practical")
+        if tab_style not in ("practical", "flat"):
+            tab_style = "practical"
+        self.tab_style = tab_style
+        if tab_style != "flat":
+            return
+        if theme == "light":
+            flat_style = """
+                QTabBar::tab {
+                    background: #E2E8F0; color: #475569;
+                    border: 1px solid #CBD5E1; border-bottom: none;
+                    border-top-left-radius: 8px; border-top-right-radius: 8px;
+                    border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;
+                    min-width: 105px; max-width: 180px; padding: 7px 12px;
+                    margin: 0px;
+                }
+                QTabBar::tab:selected { background: #FFFFFF; color: #0F172A; }
+                QTabBar::tab:hover:!selected { background: #D5DEE9; }
+            """
+        else:
+            flat_style = """
+                QTabBar::tab {
+                    background: #17243A; color: #91A2B8;
+                    border: 1px solid #2B3A54; border-bottom: none;
+                    border-top-left-radius: 8px; border-top-right-radius: 8px;
+                    border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;
+                    min-width: 105px; max-width: 180px; padding: 7px 12px;
+                    margin: 0px;
+                }
+                QTabBar::tab:selected { background: #0E1728; color: #F8FAFC; }
+                QTabBar::tab:hover:!selected { background: #21314B; }
+            """
+        self.setStyleSheet(self.styleSheet() + flat_style)
 
 
 def main():
