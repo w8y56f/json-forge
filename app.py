@@ -1878,18 +1878,32 @@ class JsonWindow(QMainWindow):
                 if cursor.hasSelection():
                     selection = (cursor.selectionStart(), cursor.selectionEnd())
             if selection is None or selection[0] == selection[1]:
+                self.search_selection_range = None
+                self.search_candidate_selection = None
+                self.initial_search_selection = None
                 self.selection_button.blockSignals(True)
                 self.selection_button.setChecked(False)
                 self.selection_button.blockSignals(False)
-                self._flash(self.tr(
-                    "请先在编辑器中选择搜索范围",
-                    "Select a search range in the editor first",
-                ))
+                QMessageBox.warning(
+                    self,
+                    self.tr("无法在选区中查找", "Find in Selection"),
+                    self.tr(
+                        "请先在编辑器中选择搜索范围。",
+                        "Select a search range in the editor first.",
+                    ),
+                )
                 return
             self.search_selection_range = selection
         else:
             self.search_selection_range = None
+            self.search_candidate_selection = None
+            self.initial_search_selection = None
         self.perform_search()
+        if not checked:
+            cursor = self.editor.textCursor()
+            if cursor.hasSelection():
+                cursor.clearSelection()
+                self.editor.setTextCursor(cursor)
 
     @staticmethod
     def _is_word_character(char: str) -> bool:
@@ -2161,6 +2175,11 @@ class JsonWindow(QMainWindow):
         cursor = editor.textCursor()
         if cursor.hasSelection():
             self.search_candidate_selection = (cursor.selectionStart(), cursor.selectionEnd())
+        else:
+            # A cleared editor selection must not leave a stale range that
+            # can be reused the next time Find in Selection is enabled.
+            self.search_candidate_selection = None
+            self.initial_search_selection = None
 
     def _refresh_active_status(self):
         editor = self.editor

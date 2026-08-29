@@ -3,10 +3,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
@@ -424,6 +426,53 @@ class BraceMatchingTests(unittest.TestCase):
         self.editor.setTextCursor(cursor)
         self.app.processEvents()
         self.assertTrue(any(color == "#38BDF8" for _, _, _, _, color in self.editor._brace_guide_segments()))
+
+
+class FindSelectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        os.environ["JSON_STUDIO_SETTINGS_PATH"] = os.path.join(self.directory.name, "settings.ini")
+        os.environ["JSON_STUDIO_SESSION_PATH"] = os.path.join(self.directory.name, "session.json")
+        settings = QSettings(os.environ["JSON_STUDIO_SETTINGS_PATH"], QSettings.Format.IniFormat)
+        settings.setValue("confirm_exit", False)
+        settings.sync()
+        self.window = JsonWindow()
+        self.window.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.window.deleteLater()
+        self.app.processEvents()
+        os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
+        os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
+        self.directory.cleanup()
+
+    def test_reenabling_selection_search_does_not_reuse_old_range(self):
+        editor = self.window.editor
+        editor.setPlainText("alpha\nbeta\nalpha")
+        self.window.search_input.setText("alpha")
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(10, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        self.app.processEvents()
+
+        self.window.selection_button.setChecked(True)
+        self.assertEqual(self.window.search_selection_range, (0, 10))
+        self.window.selection_button.setChecked(False)
+        self.assertIsNone(self.window.search_selection_range)
+        self.assertIsNone(self.window.search_candidate_selection)
+        self.assertIsNone(self.window.initial_search_selection)
+        self.assertFalse(editor.textCursor().hasSelection())
+
+        with patch("app.QMessageBox.warning") as warning:
+            self.window.selection_button.setChecked(True)
+            warning.assert_called_once()
+        self.assertFalse(self.window.selection_button.isChecked())
 
 
 class BookmarkTests(unittest.TestCase):
