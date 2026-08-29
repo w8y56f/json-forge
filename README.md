@@ -62,6 +62,35 @@ python packaging/build_release.py --target windows-x86_64
 
 生成的目录和压缩包会放在 `dist/`（macOS 为 `.tar.gz`，Windows 为 `.zip`，可直接用资源管理器解压）。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
 
+## 项目目录说明
+
+下面列出主要源码、开发文件以及不会提交到 Git 的运行时文件，便于以后迁移或重新打开项目时查找：
+
+```text
+json-forge/
+├── app.py                       # 主界面和应用逻辑
+├── json_tools.py                # JSON 解析、格式化、压缩、路径和搜索工具
+├── requirements.txt             # Python 依赖清单，目前为 PySide6
+├── config/
+│   ├── settings.default.ini     # 可提交的默认配置，用于“恢复默认配置”
+│   └── settings.ini             # 用户当前配置，运行时生成，已加入 .gitignore
+├── cache/
+│   ├── session.json              # 上次会话内容、Tab、光标、书签等，运行时生成
+│   └── json-forge.lock           # 单实例锁文件，程序运行时生成
+├── packaging/
+│   └── build_release.py          # 生成自带 Python 和 PySide6 的发布包
+├── start.sh                      # macOS 启动脚本；发布包优先使用内置 Python
+├── start.bat                     # Windows 启动脚本；发布包优先使用内置 Python
+├── dist/                         # 打包产物目录，已忽略；包含 macOS/Windows 发布包
+├── downloads/                    # 打包时下载的 Python 运行时缓存，已忽略，可重新生成
+├── .venv/                        # 本地开发虚拟环境，已忽略，不随项目迁移
+├── __pycache__/                  # Python 字节码缓存，已忽略，可随时重新生成
+├── test_json_tools.py            # JSON 工具的自动化测试
+└── test_app.py                   # 界面和应用功能的自动化测试
+```
+
+其中 `dist/` 和 `downloads/` 即使没有提交到 Git，也不要误认为是无用文件：前者是给别人使用的发布包，后者是重新打包时可以复用的下载缓存。`cache/` 和 `config/settings.ini` 则保存本机运行状态和个人设置，复制整个项目目录时可以一并迁移。
+
 用户配置默认保存在程序目录下的 `config/settings.ini`，默认值集中在可提交的 `config/settings.default.ini`；会话快照保存在 `cache/session.json`。复制或迁移整个项目目录时会一并带走配置和上次会话。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。如果程序目录没有写权限，设置会自动回退到系统配置存储，会话文件则会在可写位置保存失败时保持原有文件不变。
 
 常用快捷键：`Ctrl/Cmd + Enter` 格式化，`Ctrl/Cmd + Shift + M` 紧凑压缩，
