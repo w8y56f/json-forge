@@ -249,16 +249,16 @@ def _render(value: Any, *, compact: bool, key_style: KeyStyle, level: int = 0) -
             pieces.append(shown_key + sep + _render(item, compact=compact, key_style=key_style, level=level + 1))
         if compact:
             return "{" + ",".join(pieces) + "}"
-        indent = "  " * (level + 1)
-        return "{\n" + indent + (",\n" + indent).join(pieces) + "\n" + "  " * level + "}"
+        indent = "\t" * (level + 1)
+        return "{\n" + indent + (",\n" + indent).join(pieces) + "\n" + "\t" * level + "}"
     if isinstance(value, list):
         if not value:
             return "[]"
         pieces = [_render(item, compact=compact, key_style=key_style, level=level + 1) for item in value]
         if compact:
             return "[" + ",".join(pieces) + "]"
-        indent = "  " * (level + 1)
-        return "[\n" + indent + (",\n" + indent).join(pieces) + "\n" + "  " * level + "]"
+        indent = "\t" * (level + 1)
+        return "[\n" + indent + (",\n" + indent).join(pieces) + "\n" + "\t" * level + "]"
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 

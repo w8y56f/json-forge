@@ -18,6 +18,12 @@ class JsonToolsTest(unittest.TestCase):
         output, *_ = transform(' [1, {"x": null}] ', compact=True)
         self.assertEqual(output, '[1,{"x":null}]')
 
+    def test_readable_output_uses_stable_tab_indentation(self):
+        output = render_json({"ascii": 1, "中文字段": 2, "": 3})
+        property_lines = output.splitlines()[1:4]
+        self.assertTrue(all(line.startswith("\t") for line in property_lines))
+        self.assertTrue(all(not line.startswith(" ") for line in property_lines))
+
     def test_key_styles_only_change_keys(self):
         source = '{"normal":"a:b", "has space": "value", "quote\\\"key": 2}'
         single, *_ = transform(source, key_style="single")

@@ -179,9 +179,12 @@ class JsonHighlighter(QSyntaxHighlighter):
         add(r'"(?:\\.|[^"\\])*"', colors["string"])
         add(r"'(?:\\.|[^'\\])*'", colors["string"])
         # Key rules follow string rules so their color takes precedence.
-        add(r'"(?:\\.|[^"\\])*"(?=\s*:)', colors["key"], True)
-        add(r"'(?:\\.|[^'\\])*'(?=\s*:)", colors["key"], True)
-        add(r"\b[A-Za-z_$][\w$]*(?=\s*:)", colors["key"], True)
+        # Keep keys colored but at the editor's normal font weight. On macOS,
+        # mixing a bold Latin monospace font with a bold CJK fallback makes Qt
+        # shape otherwise identical leading spaces at different widths.
+        add(r'"(?:\\.|[^"\\])*"(?=\s*:)', colors["key"])
+        add(r"'(?:\\.|[^'\\])*'(?=\s*:)", colors["key"])
+        add(r"\b[A-Za-z_$][\w$]*(?=\s*:)", colors["key"])
         add(r"(?<![\w.])-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", colors["number"])
         add(r"\b(?:true|false)\b", colors["bool"], True)
         add(r"\bnull\b", colors["null"], True)
@@ -224,10 +227,15 @@ class JsonEditor(QPlainTextEdit):
         self.editor_theme = theme
         self.fold_regions: dict[int, int] = {}
         self.collapsed_blocks: set[int] = set()
+        self.brace_pairs: dict[int, int] = {}
+        self.highlighted_brace_positions: set[int] = set()
+        self.brace_extra_selections: list[QTextEdit.ExtraSelection] = []
+        self.search_extra_selections: list[QTextEdit.ExtraSelection] = []
         self.gutter = EditorGutter(self)
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter_area)
         self.textChanged.connect(self._rebuild_fold_regions)
+        self.cursorPositionChanged.connect(self._update_brace_highlight)
         self._update_gutter_width()
 
     def set_line_numbers_visible(self, visible: bool):
@@ -238,6 +246,7 @@ class JsonEditor(QPlainTextEdit):
     def set_editor_theme(self, theme: str):
         self.editor_theme = theme
         self.gutter.update()
+        self._update_brace_highlight()
 
     def gutter_width(self) -> int:
         number_width = 0
@@ -359,7 +368,109 @@ class JsonEditor(QPlainTextEdit):
                         regions[start_block] = max(regions.get(start_block, start_block), block_number)
         self.fold_regions = regions
         self.collapsed_blocks.intersection_update(regions)
+        self._rebuild_brace_pairs()
         self._apply_fold_visibility()
+
+    def _rebuild_brace_pairs(self):
+        text = self.toPlainText()
+        pairs: dict[int, int] = {}
+        stack: list[tuple[str, int]] = []
+        expected_open = {"}": "{", "]": "[", ")": "("}
+        quote: str | None = None
+        escaped = False
+        qt_position = 0
+        for char in text:
+            # QTextCursor positions are UTF-16 code-unit offsets, whereas
+            # Python string indexes count Unicode code points. Astral
+            # characters such as emoji therefore occupy two Qt positions.
+            position = qt_position
+            qt_position += 2 if ord(char) > 0xFFFF else 1
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                continue
+            if char in "\"'":
+                quote = char
+            elif char in "{[(":
+                stack.append((char, position))
+            elif char in "}])" and stack:
+                expected = expected_open[char]
+                # Recover from an incomplete/mismatched section instead of
+                # allowing one stale opener to poison every pair after it.
+                matching_index = next(
+                    (index for index in range(len(stack) - 1, -1, -1)
+                     if stack[index][0] == expected),
+                    None,
+                )
+                if matching_index is not None:
+                    _, opening = stack[matching_index]
+                    del stack[matching_index:]
+                    pairs[opening] = position
+                    pairs[position] = opening
+        self.brace_pairs = pairs
+        self._update_brace_highlight()
+
+    def set_search_extra_selections(self, selections: list[QTextEdit.ExtraSelection]):
+        self.search_extra_selections = selections
+        self._apply_decorations()
+
+    def _apply_decorations(self):
+        # Brace selections come last so their foreground remains red even
+        # when the same character is also part of a search result.
+        self.setExtraSelections(self.search_extra_selections + self.brace_extra_selections)
+
+    def _paired_bracket_at(self, position: int) -> int | None:
+        # Read through QTextCursor instead of indexing the Python string:
+        # both the caret and brace-pair table use Qt's UTF-16 coordinates.
+        before = QTextCursor(self.document())
+        before.setPosition(position)
+        if before.movePosition(
+            QTextCursor.MoveOperation.PreviousCharacter,
+            QTextCursor.MoveMode.KeepAnchor,
+        ):
+            before_position = before.selectionStart()
+            if before.selectedText() in "{}[]()" and before_position in self.brace_pairs:
+                return before_position
+
+        current = QTextCursor(self.document())
+        current.setPosition(position)
+        if current.movePosition(
+            QTextCursor.MoveOperation.NextCharacter,
+            QTextCursor.MoveMode.KeepAnchor,
+        ):
+            current_position = current.selectionStart()
+            if current.selectedText() in "{}[]()" and current_position in self.brace_pairs:
+                return current_position
+        return None
+
+    def _update_brace_highlight(self):
+        if not hasattr(self, "brace_pairs"):
+            return
+        bracket_position = self._paired_bracket_at(self.textCursor().position())
+        positions: set[int] = set()
+        if bracket_position is not None and bracket_position in self.brace_pairs:
+            positions = {bracket_position, self.brace_pairs[bracket_position]}
+        self.highlighted_brace_positions = positions
+        color = QColor("#FF6B6B" if self.editor_theme == "dark" else "#FF0000")
+        selections: list[QTextEdit.ExtraSelection] = []
+        for position in sorted(positions):
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(position)
+            cursor.movePosition(
+                QTextCursor.MoveOperation.NextCharacter,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format.setForeground(color)
+            selection.format.setFontWeight(QFont.Weight.Black)
+            selections.append(selection)
+        self.brace_extra_selections = selections
+        self._apply_decorations()
 
     def toggle_fold(self, start_block: int):
         if start_block not in self.fold_regions:
@@ -748,17 +859,21 @@ class JsonWindow(QMainWindow):
         editor.setObjectName("editor")
         editor.setPlaceholderText('在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容')
         editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        editor.setTabStopDistance(28)
         font = QFont("JetBrains Mono")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(13)
         editor.setFont(font)
+        # One formatting level is a tab displayed at the same width as the
+        # original two-space indentation. Tabs remain stable when Qt falls
+        # back to CJK fonts for syntax-highlighted property names.
+        editor.setTabStopDistance(editor.fontMetrics().horizontalAdvance("  "))
         editor.json_current_value = None
         editor.json_rendered_text = None
         editor.json_key_style = "double"
         editor.json_compact_mode = False
         editor.json_stats_text = "等待输入"
         editor.json_highlighter = JsonHighlighter(editor.document(), self.theme)
+        editor._update_brace_highlight()
         editor.foldStateChanged.connect(lambda _collapsed, current=editor: self._fold_state_changed(current))
         editor.cursorPositionChanged.connect(lambda current=editor: self._editor_cursor_changed(current))
         editor.selectionChanged.connect(lambda current=editor: self._editor_selection_changed(current))
@@ -954,7 +1069,7 @@ class JsonWindow(QMainWindow):
         self.selection_button.blockSignals(True)
         self.selection_button.setChecked(False)
         self.selection_button.blockSignals(False)
-        self.editor.setExtraSelections([])
+        self.editor.set_search_extra_selections([])
         self.editor.setFocus()
 
     def _toggle_find_in_selection(self, checked: bool):
@@ -1078,7 +1193,7 @@ class JsonWindow(QMainWindow):
             selection.format.setBackground(QColor(color))
             selection.format.setForeground(QColor("#111827"))
             selections.append(selection)
-        editor.setExtraSelections(selections)
+        editor.set_search_extra_selections(selections)
 
     def paste(self):
         text = QApplication.clipboard().text()
