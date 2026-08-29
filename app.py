@@ -26,6 +26,30 @@ from json_tools import (
 APP_VERSION = "v1.0.0"
 
 
+def localized(language: str, chinese: str, english: str, **values) -> str:
+    """Return and format a small UI string in the selected language."""
+    template = english if language == "en" else chinese
+    return template.format(**values) if values else template
+
+
+def platform_shortcut_hint(platform_name: str | None = None, language: str = "zh_CN") -> str:
+    """Return status-bar shortcut labels using the current platform's notation."""
+    platform_name = platform_name or sys.platform
+    if platform_name == "darwin":
+        format_shortcut = "⌘↵"
+        compact_shortcut = "⌘⇧M"
+    else:
+        format_shortcut = "Ctrl+Enter"
+        compact_shortcut = "Ctrl+Shift+M"
+    return localized(
+        language,
+        f"{format_shortcut} 格式化   ·   {compact_shortcut} 紧凑"
+        "   ·   光标移动时自动显示 JSONPath",
+        f"{format_shortcut} Format   ·   {compact_shortcut} Minify"
+        "   ·   Move the cursor to show JSONPath",
+    )
+
+
 def search_option_icon(kind: str) -> QIcon:
     """Create compact, theme-neutral icons for search option buttons."""
     pixmap = QPixmap(22, 22)
@@ -109,10 +133,12 @@ def setting_as_bool(settings: QSettings, key: str, default: bool) -> bool:
 
 
 class MoreSettingsDialog(QDialog):
-    def __init__(self, settings: QSettings, parent=None):
+    def __init__(self, settings: QSettings, language: str, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("更多设置")
+        self.language = language
+        tr = lambda zh, en: localized(language, zh, en)
+        self.setWindowTitle(tr("更多设置", "More Settings"))
         self.setMinimumWidth(420)
 
         layout = QVBoxLayout(self)
@@ -122,17 +148,24 @@ class MoreSettingsDialog(QDialog):
         general_layout.setContentsMargins(18, 18, 18, 18)
         form = QFormLayout()
         self.tab_style_combo = QComboBox()
-        self.tab_style_combo.addItem("实用模式", "practical")
-        self.tab_style_combo.addItem("扁平模式", "flat")
+        self.tab_style_combo.addItem(tr("实用模式", "Practical"), "practical")
+        self.tab_style_combo.addItem(tr("扁平模式", "Flat"), "flat")
         saved_tab_style = settings.value("tab_style", "practical")
         selected_index = self.tab_style_combo.findData(saved_tab_style)
         self.tab_style_combo.setCurrentIndex(max(0, selected_index))
-        form.addRow("Tab样式：", self.tab_style_combo)
+        form.addRow(tr("Tab样式：", "Tab style:"), self.tab_style_combo)
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("中文", "zh_CN")
+        self.language_combo.addItem("English", "en")
+        saved_language = settings.value("language", "zh_CN")
+        language_index = self.language_combo.findData(saved_language)
+        self.language_combo.setCurrentIndex(max(0, language_index))
+        form.addRow(tr("语言：", "Language:"), self.language_combo)
         general_layout.addLayout(form)
-        self.line_numbers_checkbox = QCheckBox("显示行号")
+        self.line_numbers_checkbox = QCheckBox(tr("显示行号", "Show line numbers"))
         self.line_numbers_checkbox.setChecked(setting_as_bool(settings, "show_line_numbers", True))
         general_layout.addWidget(self.line_numbers_checkbox)
-        self.confirm_exit_checkbox = QCheckBox("退出程序时提示确认")
+        self.confirm_exit_checkbox = QCheckBox(tr("退出程序时提示确认", "Confirm before exiting"))
         self.confirm_exit_checkbox.setChecked(setting_as_bool(settings, "confirm_exit", True))
         general_layout.addWidget(self.confirm_exit_checkbox)
         general_layout.addStretch()
@@ -140,8 +173,8 @@ class MoreSettingsDialog(QDialog):
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox()
-        save_button = buttons.addButton("保存", QDialogButtonBox.ButtonRole.AcceptRole)
-        cancel_button = buttons.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button = buttons.addButton(tr("保存", "Save"), QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton(tr("取消", "Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
         save_button.clicked.connect(self.accept)
         cancel_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
@@ -150,6 +183,7 @@ class MoreSettingsDialog(QDialog):
         self.settings.setValue("confirm_exit", self.confirm_exit_checkbox.isChecked())
         self.settings.setValue("show_line_numbers", self.line_numbers_checkbox.isChecked())
         self.settings.setValue("tab_style", self.tab_style_combo.currentData())
+        self.settings.setValue("language", self.language_combo.currentData())
         self.settings.sync()
         super().accept()
 
@@ -527,12 +561,16 @@ class JsonWindow(QMainWindow):
         self.theme = self.settings.value("theme", "dark")
         if self.theme not in ("light", "dark"):
             self.theme = "dark"
-        self.default_hint = "⌘↵ 格式化   ·   ⌘⇧M 紧凑   ·   光标移动时自动显示 JSONPath"
+        self.language = self.settings.value("language", "zh_CN")
+        if self.language not in ("zh_CN", "en"):
+            self.language = "zh_CN"
+        self.default_hint = platform_shortcut_hint(language=self.language)
         self.setWindowTitle("JSON Studio")
         self.resize(1080, 720)
         self.setMinimumSize(760, 480)
         self._build_ui()
         self._connect()
+        self.apply_language(self.language)
         self.apply_theme(self.theme)
         self.add_tab()
         self.editor.setFocus()
@@ -540,6 +578,9 @@ class JsonWindow(QMainWindow):
     @property
     def editor(self) -> QPlainTextEdit:
         return self.editor_stack.currentWidget()
+
+    def tr(self, chinese: str, english: str, **values) -> str:
+        return localized(self.language, chinese, english, **values)
 
     def _get_editor_state(self, name: str, default=None):
         return getattr(self.editor, name, default)
@@ -598,11 +639,11 @@ class JsonWindow(QMainWindow):
         title_row.setContentsMargins(20, 6, 18, 4)
         title = QLabel("JSON Studio")
         title.setObjectName("title")
-        subtitle = QLabel("粘贴、整理和定位 JSON")
-        subtitle.setObjectName("subtitle")
+        self.subtitle = QLabel("粘贴、整理和定位 JSON")
+        self.subtitle.setObjectName("subtitle")
         title_row.addWidget(title)
         title_row.addSpacing(10)
-        title_row.addWidget(subtitle)
+        title_row.addWidget(self.subtitle)
         title_row.addStretch()
         self.settings_button = QToolButton()
         self.settings_button.setText("⚙ 设置")
@@ -615,7 +656,7 @@ class JsonWindow(QMainWindow):
         self.light_action = QAction("浅色主题", self, checkable=True)
         self.theme_group.addAction(self.dark_action)
         self.theme_group.addAction(self.light_action)
-        self.theme_menu.addSection("外观")
+        self.appearance_section = self.theme_menu.addSection("外观")
         self.theme_menu.addActions((self.light_action, self.dark_action))
         self.theme_menu.addSeparator()
         self.more_settings_action = QAction("更多设置", self)
@@ -638,6 +679,7 @@ class JsonWindow(QMainWindow):
         self.tab_bar.setExpanding(False)
         self.tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
         self.tab_bar.setUsesScrollButtons(False)
+        self.tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tab_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.tab_bar.overflow_callback = self._update_tab_navigation
         self.tab_left_button = QToolButton()
@@ -669,7 +711,7 @@ class JsonWindow(QMainWindow):
         tools.setContentsMargins(10, 8, 10, 8)
         tools.setSpacing(7)
         self.format_button = self._button("格式化", True)
-        self.compact_button = self._button("移除空格")
+        self.compact_button = self._button("压缩JSON")
         self.bare_button = self._button("键名无引号")
         self.double_button = self._button('键名双引号')
         self.single_button = self._button("键名单引号")
@@ -836,6 +878,7 @@ class JsonWindow(QMainWindow):
         self.tab_bar.tabCloseRequested.connect(self.close_tab)
         self.tab_bar.tabBarDoubleClicked.connect(self.rename_tab)
         self.tab_bar.tabMoved.connect(self.move_tab)
+        self.tab_bar.customContextMenuRequested.connect(self.show_tab_context_menu)
         self.search_input.textChanged.connect(lambda: self.perform_search())
         self.case_button.toggled.connect(lambda: self.perform_search())
         self.word_button.toggled.connect(lambda: self.perform_search())
@@ -857,7 +900,10 @@ class JsonWindow(QMainWindow):
             setting_as_bool(self.settings, "show_line_numbers", True),
         )
         editor.setObjectName("editor")
-        editor.setPlaceholderText('在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容')
+        editor.setPlaceholderText(self.tr(
+            '在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容',
+            'Paste JSON here, for example:\nLog prefix... {"user": {"name": "Alice"}} ...suffix',
+        ))
         editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         font = QFont("JetBrains Mono")
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -871,7 +917,9 @@ class JsonWindow(QMainWindow):
         editor.json_rendered_text = None
         editor.json_key_style = "double"
         editor.json_compact_mode = False
-        editor.json_stats_text = "等待输入"
+        editor.json_stats_text = self.tr("等待输入", "Waiting for input")
+        editor.json_stats_state = "waiting"
+        editor.json_stats_counts = None
         editor.json_highlighter = JsonHighlighter(editor.document(), self.theme)
         editor._update_brace_highlight()
         editor.foldStateChanged.connect(lambda _collapsed, current=editor: self._fold_state_changed(current))
@@ -914,17 +962,19 @@ class JsonWindow(QMainWindow):
     def _update_fold_button(self):
         editor = self.editor
         if editor is None:
-            self.fold_button.setText("折叠")
+            self.fold_button.setText(self.tr("折叠", "Collapse"))
             self.fold_button.setEnabled(False)
             return
         collapsed = bool(editor.collapsed_blocks)
-        self.fold_button.setText("展开" if collapsed else "折叠")
+        self.fold_button.setText(
+            self.tr("展开", "Expand") if collapsed else self.tr("折叠", "Collapse")
+        )
         self.fold_button.setEnabled(bool(editor.fold_regions))
 
     def toggle_all_folds(self):
         editor = self.editor
         if editor is None or not editor.fold_regions:
-            self._flash("当前内容没有可折叠的对象或数组")
+            self._flash(self.tr("当前内容没有可折叠的对象或数组", "No collapsible objects or arrays"))
             return
         if editor.collapsed_blocks:
             editor.collapsed_blocks.clear()
@@ -955,7 +1005,11 @@ class JsonWindow(QMainWindow):
     def _update_tab_count_button(self):
         count = self.tab_bar.count()
         self.add_tab_button.setText(f"+({count})")
-        self.add_tab_button.setToolTip(f"新建标签页（当前 {count} 个）")
+        self.add_tab_button.setToolTip(self.tr(
+            "新建标签页（当前 {count} 个）",
+            "New tab ({count} open)",
+            count=count,
+        ))
         QTimer.singleShot(0, self._update_tab_navigation)
 
     def _update_tab_navigation(self):
@@ -987,44 +1041,72 @@ class JsonWindow(QMainWindow):
         if index < 0:
             return
         current = self.tab_bar.tabText(index)
-        title, accepted = QInputDialog.getText(self, "重命名标签", "标签名称：", text=current)
+        title, accepted = QInputDialog.getText(
+            self,
+            self.tr("重命名标签", "Rename Tab"),
+            self.tr("标签名称：", "Tab name:"),
+            text=current,
+        )
         title = title.strip()
         if accepted and title:
             self.tab_bar.setTabText(index, title)
 
+    def show_tab_context_menu(self, position: QPoint):
+        index = self.tab_bar.tabAt(position)
+        if index < 0:
+            return
+        menu = self._create_tab_context_menu(index)
+        menu.exec(self.tab_bar.mapToGlobal(position))
+
+    def _create_tab_context_menu(self, index: int) -> QMenu:
+        menu = QMenu(self.tab_bar)
+        rename_action = menu.addAction(self.tr("重命名", "Rename"))
+        rename_action.triggered.connect(lambda _checked=False: self.rename_tab(index))
+        return menu
+
     def _confirm_close_tab(self, title: str) -> bool:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("关闭标签")
-        box.setText(f"确定要关闭“{title}”吗？")
-        box.setInformativeText("该标签中有内容，关闭后内容将丢失。")
-        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        close_button = box.addButton("关闭", QMessageBox.ButtonRole.DestructiveRole)
+        box.setWindowTitle(self.tr("关闭标签", "Close Tab"))
+        box.setText(self.tr("确定要关闭“{title}”吗？", 'Close "{title}"?', title=title))
+        box.setInformativeText(self.tr(
+            "该标签中有内容，关闭后内容将丢失。",
+            "This tab contains text. Its contents will be lost.",
+        ))
+        cancel_button = box.addButton(self.tr("取消", "Cancel"), QMessageBox.ButtonRole.RejectRole)
+        close_button = box.addButton(self.tr("关闭", "Close"), QMessageBox.ButtonRole.DestructiveRole)
         box.setDefaultButton(cancel_button)
         box.setEscapeButton(cancel_button)
         box.exec()
         return box.clickedButton() is close_button
 
     def show_more_settings(self):
-        dialog = MoreSettingsDialog(self.settings, self)
+        dialog = MoreSettingsDialog(self.settings, self.language, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_language(self.settings.value("language", "zh_CN"))
             self.apply_theme(self.theme)
 
     def show_about(self):
         box = QMessageBox(self)
-        box.setWindowTitle("关于 JSON Studio")
+        box.setWindowTitle(self.tr("关于 JSON Studio", "About JSON Studio"))
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(f"JSON Studio {APP_VERSION}")
-        box.setInformativeText(f"当前 Python 版本：{platform.python_version()}\n\n本地 JSON 格式化、转换与路径定位工具")
+        box.setInformativeText(self.tr(
+            "当前 Python 版本：{version}\n\n本地 JSON 格式化、转换与路径定位工具"
+            "\n\nPowered by Stone Wang",
+            "Python version: {version}\n\nA local tool for formatting, converting, and navigating JSON"
+            "\n\nPowered by Stone Wang",
+            version=platform.python_version(),
+        ))
         box.exec()
 
     def _confirm_exit(self) -> bool:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("退出 JSON Studio")
-        box.setText("确定要退出 JSON Studio 吗？")
-        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        exit_button = box.addButton("退出", QMessageBox.ButtonRole.AcceptRole)
+        box.setWindowTitle(self.tr("退出 JSON Studio", "Exit JSON Studio"))
+        box.setText(self.tr("确定要退出 JSON Studio 吗？", "Exit JSON Studio?"))
+        cancel_button = box.addButton(self.tr("取消", "Cancel"), QMessageBox.ButtonRole.RejectRole)
+        exit_button = box.addButton(self.tr("退出", "Exit"), QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(cancel_button)
         box.setEscapeButton(cancel_button)
         box.exec()
@@ -1083,7 +1165,10 @@ class JsonWindow(QMainWindow):
                 self.selection_button.blockSignals(True)
                 self.selection_button.setChecked(False)
                 self.selection_button.blockSignals(False)
-                self._flash("请先在编辑器中选择搜索范围")
+                self._flash(self.tr(
+                    "请先在编辑器中选择搜索范围",
+                    "Select a search range in the editor first",
+                ))
                 return
             self.search_selection_range = selection
         else:
@@ -1199,12 +1284,51 @@ class JsonWindow(QMainWindow):
         text = QApplication.clipboard().text()
         if text:
             self.editor.setPlainText(text)
-            self._flash("已从剪贴板粘贴")
+            self._flash(self.tr("已从剪贴板粘贴", "Pasted from clipboard"))
+
+    def _localized_json_error(self, message: str) -> str:
+        if self.language != "en":
+            return message
+        exact = {
+            "没有找到完整、有效的 JSON 对象或数组": "No complete, valid JSON object or array was found",
+            "字符串包含无效的 Unicode 转义": "The string contains an invalid Unicode escape",
+            "字符串缺少结束引号": "The string is missing its closing quote",
+            "缺少 JSON 值": "A JSON value is missing",
+            "对象缺少结束大括号": "The object is missing its closing brace",
+            "数组缺少结束方括号": "The array is missing its closing bracket",
+        }
+        if message in exact:
+            return exact[message]
+        match = re.fullmatch(
+            r"没有找到完整、有效的 JSON 对象或数组（附近第 (\d+) 行、第 (\d+) 列）",
+            message,
+        )
+        if match:
+            return (
+                "No complete, valid JSON object or array was found "
+                f"(near line {match.group(1)}, column {match.group(2)})"
+            )
+        match = re.fullmatch(r"字符串包含无效转义：(.+)", message)
+        if match:
+            return f"The string contains an invalid escape: {match.group(1)}"
+        match = re.fullmatch(r"第 (\d+) 个字符附近缺少 (.+)", message)
+        if match:
+            return f"Missing {match.group(2)} near character {match.group(1)}"
+        match = re.fullmatch(r"第 (\d+) 个字符附近不是有效的 JSON 值", message)
+        if match:
+            return f"Invalid JSON value near character {match.group(1)}"
+        match = re.fullmatch(r"第 (\d+) 个字符附近不是有效的属性名", message)
+        if match:
+            return f"Invalid property name near character {match.group(1)}"
+        match = re.fullmatch(r"第 (\d+) 个字符附近缺少逗号或结束大括号", message)
+        if match:
+            return f"Missing a comma or closing brace near character {match.group(1)}"
+        return "Invalid JSON: " + message
 
     def apply_transform(self, compact: bool, style: str):
         text = self.editor.toPlainText()
         if not text.strip():
-            self._flash("请先粘贴 JSON", error=True)
+            self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
             return
         if self.current_value is not None and text == self.rendered_text:
             value = self.current_value
@@ -1214,10 +1338,10 @@ class JsonWindow(QMainWindow):
             try:
                 parsed = parse_json_like(text)
             except (JsonToolError, ValueError) as exc:
-                self._flash(str(exc), error=True)
+                self._flash(self._localized_json_error(str(exc)), error=True)
                 return
             if parsed.mixed and not self._confirm_mixed_mode(parsed.key_styles):
-                self._flash("已取消，原始内容保持不变")
+                self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
                 return
             value = parsed.value
             prefix, suffix = parsed.start, len(text) - parsed.end
@@ -1231,30 +1355,51 @@ class JsonWindow(QMainWindow):
         self.key_style = style
         self.compact_mode = compact
         count, depth = value_stats(value)
-        self.editor.json_stats_text = f"{count} 个节点  ·  深度 {depth}"
+        self.editor.json_stats_state = "computed"
+        self.editor.json_stats_counts = (count, depth)
+        self.editor.json_stats_text = self._localized_editor_stats(self.editor)
         self.stats_label.setText(self.editor.json_stats_text)
         removed = prefix + suffix
-        message = "已压缩 JSON" if compact else "已格式化 JSON"
+        message = (
+            self.tr("已压缩 JSON", "JSON minified")
+            if compact else self.tr("已格式化 JSON", "JSON formatted")
+        )
         if removed:
-            message += f"，并移除首尾 {removed} 个字符"
+            message += self.tr(
+                "，并移除首尾 {removed} 个字符",
+                "; removed {removed} surrounding characters",
+                removed=removed,
+            )
         if style == "bare":
-            message += "；特殊键名保留引号"
+            message += self.tr("；特殊键名保留引号", "; special keys remain quoted")
         self._flash(message)
         self.update_path()
 
     def _confirm_mixed_mode(self, styles) -> bool:
-        names = {"double": "双引号", "single": "单引号", "bare": "无引号"}
-        used = "、".join(names[style] for style in ("double", "single", "bare") if style in styles)
+        names = {
+            "double": self.tr("双引号", "double quotes"),
+            "single": self.tr("单引号", "single quotes"),
+            "bare": self.tr("无引号", "unquoted"),
+        }
+        separator = "、" if self.language == "zh_CN" else ", "
+        used = separator.join(names[style] for style in ("double", "single", "bare") if style in styles)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("检测到混合模式")
-        box.setText("给定的 JSON 字符串是混合模式")
-        box.setInformativeText(
-            f"检测到属性名同时使用了：{used}。\n\n"
-            "选择“净化并继续”会先修正为双引号标准 JSON，再执行刚才的操作。"
+        box.setWindowTitle(self.tr("检测到混合模式", "Mixed Mode Detected"))
+        box.setText(self.tr("给定的 JSON 字符串是混合模式", "The JSON string uses mixed key styles"))
+        box.setInformativeText(self.tr(
+            "检测到属性名同时使用了：{used}。\n\n"
+            "选择“净化并继续”会先修正为双引号标准 JSON，再执行刚才的操作。",
+            "Property names use: {used}.\n\n"
+            'Choose "Normalize and Continue" to convert to standard double-quoted JSON first, '
+            "then perform the requested operation.",
+            used=used,
+        ))
+        cancel_button = box.addButton(self.tr("取消", "Cancel"), QMessageBox.ButtonRole.RejectRole)
+        continue_button = box.addButton(
+            self.tr("净化并继续", "Normalize and Continue"),
+            QMessageBox.ButtonRole.AcceptRole,
         )
-        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        continue_button = box.addButton("净化并继续", QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(continue_button)
         box.setEscapeButton(cancel_button)
         box.exec()
@@ -1265,11 +1410,15 @@ class JsonWindow(QMainWindow):
         if not text:
             editor.json_current_value = None
             editor.json_rendered_text = None
-            editor.json_stats_text = "等待输入"
+            editor.json_stats_state = "waiting"
+            editor.json_stats_counts = None
+            editor.json_stats_text = self._localized_editor_stats(editor)
         elif editor.json_rendered_text is not None and text != editor.json_rendered_text:
             editor.json_current_value = None
             editor.json_rendered_text = None
-            editor.json_stats_text = "内容已修改"
+            editor.json_stats_state = "modified"
+            editor.json_stats_counts = None
+            editor.json_stats_text = self._localized_editor_stats(editor)
         if editor is self.editor:
             self.stats_label.setText(editor.json_stats_text)
             self.update_path()
@@ -1303,15 +1452,20 @@ class JsonWindow(QMainWindow):
         cursor = self.editor.textCursor()
         text = self.editor.toPlainText()
         path = path_at_position(text, cursor.position(), True) if text else "$"
-        self.path_label.setText(f"路径  {path}")
+        self.path_label.setText(self.tr("路径  {path}", "Path  {path}", path=path))
         self.path_label.setToolTip(path)
-        self.position_label.setText(f"行 {cursor.blockNumber() + 1}，列 {cursor.positionInBlock() + 1}")
+        self.position_label.setText(self.tr(
+            "行 {line}，列 {column}",
+            "Line {line}, Col {column}",
+            line=cursor.blockNumber() + 1,
+            column=cursor.positionInBlock() + 1,
+        ))
 
     def copy_path(self, include_root: bool):
         text = self.editor.toPlainText()
         path = path_at_position(text, self.editor.textCursor().position(), include_root)
         QApplication.clipboard().setText(path)
-        self._flash(f"已复制：{path}")
+        self._flash(self.tr("已复制：{path}", "Copied: {path}", path=path))
 
     def _flash(self, message: str, error: bool = False):
         self.hint.setText(message)
@@ -1326,6 +1480,82 @@ class JsonWindow(QMainWindow):
             self.hint.style().polish(self.hint)
 
         QTimer.singleShot(3500, restore_hint)
+
+    def _localized_editor_stats(self, editor: QPlainTextEdit) -> str:
+        state = getattr(editor, "json_stats_state", "waiting")
+        if state == "computed" and getattr(editor, "json_stats_counts", None):
+            count, depth = editor.json_stats_counts
+            return self.tr(
+                "{count} 个节点  ·  深度 {depth}",
+                "{count} nodes  ·  depth {depth}",
+                count=count,
+                depth=depth,
+            )
+        if state == "modified":
+            return self.tr("内容已修改", "Modified")
+        return self.tr("等待输入", "Waiting for input")
+
+    def apply_language(self, language: str):
+        if language not in ("zh_CN", "en"):
+            language = "zh_CN"
+        self.language = language
+        self.settings.setValue("language", language)
+        self.settings.sync()
+        self.default_hint = platform_shortcut_hint(language=language)
+
+        self.subtitle.setText(self.tr("粘贴、整理和定位 JSON", "Paste, format, and navigate JSON"))
+        self.settings_button.setText(self.tr("⚙ 设置", "⚙ Settings"))
+        self.appearance_section.setText(self.tr("外观", "Appearance"))
+        self.dark_action.setText(self.tr("深色主题", "Dark theme"))
+        self.light_action.setText(self.tr("浅色主题", "Light theme"))
+        self.more_settings_action.setText(self.tr("更多设置", "More Settings"))
+        self.about_action.setText(self.tr("关于", "About"))
+
+        self.tab_bar.rename_hint = self.tr(
+            "双击标签标题可重命名",
+            "Double-click the tab title to rename",
+        )
+        left_tip = self.tr("向左浏览标签", "Browse tabs to the left")
+        right_tip = self.tr("向右浏览标签", "Browse tabs to the right")
+        self.tab_left_button.setToolTip(left_tip)
+        self.tab_left_button.setAccessibleName(left_tip)
+        self.tab_right_button.setToolTip(right_tip)
+        self.tab_right_button.setAccessibleName(right_tip)
+
+        self.format_button.setText(self.tr("格式化", "Format"))
+        self.compact_button.setText(self.tr("压缩JSON", "Minify JSON"))
+        self.bare_button.setText(self.tr("键名无引号", "Unquoted Keys"))
+        self.double_button.setText(self.tr("键名双引号", "Double-Quoted Keys"))
+        self.single_button.setText(self.tr("键名单引号", "Single-Quoted Keys"))
+        self.paste_button.setText(self.tr("从剪贴板粘贴", "Paste from Clipboard"))
+        self.clear_button.setText(self.tr("清空", "Clear"))
+
+        self.search_input.setPlaceholderText(self.tr("查找", "Find"))
+        self.case_button.setToolTip(self.tr("大小写敏感", "Match Case"))
+        self.word_button.setToolTip(self.tr("全字匹配", "Whole Word"))
+        self.selection_button.setToolTip(self.tr("在选区中查找", "Find in Selection"))
+        self.search_scope.setItemText(0, self.tr("都搜索", "Search All"))
+        self.search_scope.setItemText(1, self.tr("仅属性名", "Keys Only"))
+        self.search_scope.setItemText(2, self.tr("仅属性值", "Values Only"))
+        self.search_up_button.setToolTip(self.tr("上一个匹配（Shift+Enter）", "Previous Match (Shift+Enter)"))
+        self.search_down_button.setToolTip(self.tr("下一个匹配（Enter）", "Next Match (Enter)"))
+        self.search_close_button.setToolTip(self.tr("关闭查找（Esc）", "Close Find (Esc)"))
+
+        placeholder = self.tr(
+            '在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容',
+            'Paste JSON here, for example:\nLog prefix... {"user": {"name": "Alice"}} ...suffix',
+        )
+        for index in range(self.editor_stack.count()):
+            editor = self.editor_stack.widget(index)
+            editor.setPlaceholderText(placeholder)
+            editor.json_stats_text = self._localized_editor_stats(editor)
+
+        self.copy_full.setText(self.tr("复制 $", "Copy $"))
+        self.copy_plain.setText(self.tr("复制无 $", "Copy without $"))
+        self.hint.setText(self.default_hint)
+        self._update_fold_button()
+        self._update_tab_count_button()
+        self._refresh_active_status()
 
     def apply_theme(self, theme: str):
         self.theme = theme
