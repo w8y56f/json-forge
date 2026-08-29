@@ -43,6 +43,25 @@ python3 -m venv .venv
 .venv/bin/python app.py
 ```
 
+## 制作免安装 Python 的发布包
+
+发布包会把独立 Python 运行时和 PySide6 一起放进目录，因此目标电脑不需要预先安装 Python。目录内的 `start.sh`（macOS）和 `start.bat`（Windows）会自动调用随包附带的运行时。
+
+在 macOS Apple Silicon 上制作发布包：
+
+```bash
+.venv/bin/python packaging/build_release.py --target macos-arm64
+```
+
+其他目标可使用同一个脚本：
+
+```bash
+python packaging/build_release.py --target macos-x86_64
+python packaging/build_release.py --target windows-x86_64
+```
+
+生成的目录和压缩包会放在 `dist/`。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
+
 用户配置默认保存在程序目录下的 `config/settings.ini`，默认值集中在可提交的 `config/settings.default.ini`；会话快照保存在 `cache/session.json`。复制或迁移整个项目目录时会一并带走配置和上次会话。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。如果程序目录没有写权限，设置会自动回退到系统配置存储，会话文件则会在可写位置保存失败时保持原有文件不变。
 
 常用快捷键：`Ctrl/Cmd + Enter` 格式化，`Ctrl/Cmd + Shift + M` 紧凑压缩，
