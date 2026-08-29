@@ -1794,9 +1794,15 @@ class JsonWindow(QMainWindow):
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(f"{APP_NAME} {APP_VERSION}")
         box.setInformativeText(self.tr(
-            "当前 Python 版本：{version}\n\n本地 JSON 格式化、转换与路径定位工具"
+            "基于Python的版本：{version}\n\n"
+            "如果使用电脑环境中的 Python，请注意 Python 版本兼容性；"
+            "版本过高或过低都可能导致问题。\n\n"
+            "本地 JSON 格式化、转换与路径定位工具"
             "\n\nPowered by Stone Wang",
-            "Python version: {version}\n\nA local tool for formatting, converting, and navigating JSON"
+            "Python base version: {version}\n\n"
+            "If you use your computer's Python environment, check Python version compatibility; "
+            "versions that are too new or too old may cause issues.\n\n"
+            "A local tool for formatting, converting, and navigating JSON"
             "\n\nPowered by Stone Wang",
             version=platform.python_version(),
         ))
