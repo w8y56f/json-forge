@@ -3,10 +3,10 @@ from __future__ import annotations
 import sys
 import platform
 
-from PySide6.QtCore import QEvent, QRegularExpression, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, QRegularExpression, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QAction, QActionGroup, QColor, QFont, QKeySequence, QShortcut,
-    QTextCharFormat, QSyntaxHighlighter,
+    QAction, QActionGroup, QColor, QFont, QKeySequence, QPainter, QPolygon,
+    QShortcut, QTextCharFormat, QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
@@ -93,6 +93,9 @@ class MoreSettingsDialog(QDialog):
         self.tab_style_combo.setCurrentIndex(max(0, selected_index))
         form.addRow("Tab样式：", self.tab_style_combo)
         general_layout.addLayout(form)
+        self.line_numbers_checkbox = QCheckBox("显示行号")
+        self.line_numbers_checkbox.setChecked(setting_as_bool(settings, "show_line_numbers", True))
+        general_layout.addWidget(self.line_numbers_checkbox)
         self.confirm_exit_checkbox = QCheckBox("退出程序时提示确认")
         self.confirm_exit_checkbox.setChecked(setting_as_bool(settings, "confirm_exit", True))
         general_layout.addWidget(self.confirm_exit_checkbox)
@@ -109,6 +112,7 @@ class MoreSettingsDialog(QDialog):
 
     def accept(self):
         self.settings.setValue("confirm_exit", self.confirm_exit_checkbox.isChecked())
+        self.settings.setValue("show_line_numbers", self.line_numbers_checkbox.isChecked())
         self.settings.setValue("tab_style", self.tab_style_combo.currentData())
         self.settings.sync()
         super().accept()
@@ -154,6 +158,203 @@ class JsonHighlighter(QSyntaxHighlighter):
             while iterator.hasNext():
                 match = iterator.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
+
+
+class EditorGutter(QWidget):
+    def __init__(self, editor: "JsonEditor"):
+        super().__init__(editor)
+        self.editor = editor
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self):
+        return QSize(self.editor.gutter_width(), 0)
+
+    def paintEvent(self, event):
+        self.editor.paint_gutter(event)
+
+    def mousePressEvent(self, event):
+        self.editor.gutter_mouse_press(event)
+
+
+class JsonEditor(QPlainTextEdit):
+    """Plain-text editor with optional line numbers and JSON node folding."""
+
+    foldStateChanged = Signal(bool)
+    fold_column_width = 20
+
+    def __init__(self, theme: str, show_line_numbers: bool, parent=None):
+        super().__init__(parent)
+        self.show_line_numbers = show_line_numbers
+        self.editor_theme = theme
+        self.fold_regions: dict[int, int] = {}
+        self.collapsed_blocks: set[int] = set()
+        self.gutter = EditorGutter(self)
+        self.blockCountChanged.connect(self._update_gutter_width)
+        self.updateRequest.connect(self._update_gutter_area)
+        self.textChanged.connect(self._rebuild_fold_regions)
+        self._update_gutter_width()
+
+    def set_line_numbers_visible(self, visible: bool):
+        self.show_line_numbers = visible
+        self._update_gutter_width()
+        self.gutter.update()
+
+    def set_editor_theme(self, theme: str):
+        self.editor_theme = theme
+        self.gutter.update()
+
+    def gutter_width(self) -> int:
+        number_width = 0
+        if self.show_line_numbers:
+            digits = max(2, len(str(max(1, self.blockCount()))))
+            number_width = self.fontMetrics().horizontalAdvance("9") * digits + 12
+        return number_width + self.fold_column_width
+
+    def _update_gutter_width(self, _=None):
+        self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+
+    def _update_gutter_area(self, rect, dy):
+        if dy:
+            self.gutter.scroll(0, dy)
+        else:
+            self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_gutter_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        contents = self.contentsRect()
+        self.gutter.setGeometry(QRect(contents.left(), contents.top(), self.gutter_width(), contents.height()))
+
+    def paint_gutter(self, event):
+        painter = QPainter(self.gutter)
+        dark = self.editor_theme == "dark"
+        painter.fillRect(event.rect(), QColor("#0A1322" if dark else "#EEF2F7"))
+        number_color = QColor("#64748B" if dark else "#7C8A9D")
+        marker_color = QColor("#5EEAD4" if dark else "#0F766E")
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + round(self.blockBoundingRect(block).height())
+        number_area_width = self.gutter_width() - self.fold_column_width
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                if self.show_line_numbers:
+                    painter.setPen(number_color)
+                    painter.drawText(0, top, number_area_width - 4, self.fontMetrics().height(),
+                                     Qt.AlignmentFlag.AlignRight, str(block_number + 1))
+                if block_number in self.fold_regions:
+                    center_x = number_area_width + self.fold_column_width // 2
+                    center_y = top + self.fontMetrics().height() // 2
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(marker_color)
+                    if block_number in self.collapsed_blocks:
+                        points = QPolygon([
+                            QPoint(center_x - 3, center_y - 5),
+                            QPoint(center_x - 3, center_y + 5),
+                            QPoint(center_x + 4, center_y),
+                        ])
+                    else:
+                        points = QPolygon([
+                            QPoint(center_x - 5, center_y - 3),
+                            QPoint(center_x + 5, center_y - 3),
+                            QPoint(center_x, center_y + 4),
+                        ])
+                    painter.drawPolygon(points)
+            block = block.next()
+            block_number += 1
+            top = bottom
+            bottom = top + round(self.blockBoundingRect(block).height())
+
+    def gutter_mouse_press(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        marker_start = self.gutter_width() - self.fold_column_width
+        if event.position().x() < marker_start:
+            return
+        y = event.position().y()
+        block = self.firstVisibleBlock()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        while block.isValid():
+            height = round(self.blockBoundingRect(block).height())
+            if block.isVisible() and top <= y < top + height:
+                self.toggle_fold(block.blockNumber())
+                return
+            if block.isVisible():
+                top += height
+            block = block.next()
+
+    def _rebuild_fold_regions(self):
+        # Editing invalidates existing block numbers, so expand before rebuilding.
+        block = self.document().firstBlock()
+        while block.isValid():
+            block.setVisible(True)
+            block.setLineCount(1)
+            block = block.next()
+
+        regions: dict[int, int] = {}
+        stack: list[tuple[str, int]] = []
+        quote: str | None = None
+        escaped = False
+        block_number = 0
+        for char in self.toPlainText():
+            if char == "\n":
+                block_number += 1
+                continue
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                continue
+            if char in "\"'":
+                quote = char
+            elif char in "[{":
+                stack.append((char, block_number))
+            elif char in "]}" and stack:
+                expected = "[" if char == "]" else "{"
+                if stack[-1][0] == expected:
+                    _, start_block = stack.pop()
+                    if block_number > start_block:
+                        regions[start_block] = max(regions.get(start_block, start_block), block_number)
+        self.fold_regions = regions
+        self.collapsed_blocks.intersection_update(regions)
+        self._apply_fold_visibility()
+
+    def toggle_fold(self, start_block: int):
+        if start_block not in self.fold_regions:
+            return
+        if start_block in self.collapsed_blocks:
+            self.collapsed_blocks.remove(start_block)
+        else:
+            self.collapsed_blocks.add(start_block)
+            cursor = self.textCursor()
+            if start_block < cursor.blockNumber() <= self.fold_regions[start_block]:
+                target = self.document().findBlockByNumber(start_block)
+                cursor.setPosition(target.position() + max(0, target.length() - 1))
+                self.setTextCursor(cursor)
+        self._apply_fold_visibility()
+
+    def _apply_fold_visibility(self):
+        block = self.document().firstBlock()
+        while block.isValid():
+            block.setVisible(True)
+            block.setLineCount(1)
+            block = block.next()
+        for start, end in sorted((start, self.fold_regions[start]) for start in self.collapsed_blocks):
+            block = self.document().findBlockByNumber(start + 1)
+            while block.isValid() and block.blockNumber() <= end:
+                block.setVisible(False)
+                block.setLineCount(0)
+                block = block.next()
+        self.document().markContentsDirty(0, self.document().characterCount())
+        self.viewport().update()
+        self.gutter.update()
+        self.foldStateChanged.emit(bool(self.collapsed_blocks))
 
 
 class JsonWindow(QMainWindow):
@@ -310,12 +511,15 @@ class JsonWindow(QMainWindow):
         self.bare_button = self._button("键名无引号")
         self.double_button = self._button('键名双引号')
         self.single_button = self._button("键名单引号")
+        self.fold_button = self._button("折叠")
+        self.fold_button.setEnabled(False)
         self.paste_button = self._button("从剪贴板粘贴")
         self.clear_button = self._button("清空")
         for button in (self.format_button, self.compact_button, self.bare_button,
                        self.double_button, self.single_button):
             tools.addWidget(button)
         tools.addStretch()
+        tools.addWidget(self.fold_button)
         tools.addWidget(self.paste_button)
         tools.addWidget(self.clear_button)
         toolbar_container = QWidget()
@@ -365,6 +569,7 @@ class JsonWindow(QMainWindow):
         self.bare_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "bare"))
         self.double_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "double"))
         self.single_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "single"))
+        self.fold_button.clicked.connect(self.toggle_all_folds)
         self.paste_button.clicked.connect(self.paste)
         self.clear_button.clicked.connect(lambda: self.editor.clear())
         self.copy_full.clicked.connect(lambda: self.copy_path(True))
@@ -385,8 +590,11 @@ class JsonWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.add_tab)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
 
-    def _create_editor(self) -> QPlainTextEdit:
-        editor = QPlainTextEdit()
+    def _create_editor(self) -> JsonEditor:
+        editor = JsonEditor(
+            self.theme,
+            setting_as_bool(self.settings, "show_line_numbers", True),
+        )
         editor.setObjectName("editor")
         editor.setPlaceholderText('在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容')
         editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
@@ -401,6 +609,7 @@ class JsonWindow(QMainWindow):
         editor.json_compact_mode = False
         editor.json_stats_text = "等待输入"
         editor.json_highlighter = JsonHighlighter(editor.document(), self.theme)
+        editor.foldStateChanged.connect(lambda _collapsed, current=editor: self._fold_state_changed(current))
         editor.cursorPositionChanged.connect(lambda current=editor: self._editor_cursor_changed(current))
         editor.textChanged.connect(lambda current=editor: self._editor_text_changed(current))
         return editor
@@ -414,6 +623,7 @@ class JsonWindow(QMainWindow):
         self._update_tab_count_button()
         self.tab_bar.setCurrentIndex(index)
         self.editor_stack.setCurrentIndex(index)
+        self._update_fold_button()
         editor.setFocus()
 
     def switch_tab(self, index: int):
@@ -421,6 +631,32 @@ class JsonWindow(QMainWindow):
             self.editor_stack.setCurrentIndex(index)
             self._refresh_active_status()
             self._update_tab_navigation()
+            self._update_fold_button()
+
+    def _fold_state_changed(self, editor: JsonEditor):
+        if editor is self.editor:
+            self._update_fold_button()
+
+    def _update_fold_button(self):
+        editor = self.editor
+        if editor is None:
+            self.fold_button.setText("折叠")
+            self.fold_button.setEnabled(False)
+            return
+        collapsed = bool(editor.collapsed_blocks)
+        self.fold_button.setText("展开" if collapsed else "折叠")
+        self.fold_button.setEnabled(bool(editor.fold_regions))
+
+    def toggle_all_folds(self):
+        editor = self.editor
+        if editor is None or not editor.fold_regions:
+            self._flash("当前内容没有可折叠的对象或数组")
+            return
+        if editor.collapsed_blocks:
+            editor.collapsed_blocks.clear()
+        else:
+            editor.collapsed_blocks = set(editor.fold_regions)
+        editor._apply_fold_visibility()
 
     def close_tab(self, index: int):
         if index < 0:
@@ -650,8 +886,12 @@ class JsonWindow(QMainWindow):
         self.dark_action.setChecked(theme == "dark")
         self.light_action.setChecked(theme == "light")
         if hasattr(self, "editor_stack"):
+            show_line_numbers = setting_as_bool(self.settings, "show_line_numbers", True)
             for index in range(self.editor_stack.count()):
-                self.editor_stack.widget(index).json_highlighter.set_theme(theme)
+                editor = self.editor_stack.widget(index)
+                editor.json_highlighter.set_theme(theme)
+                editor.set_editor_theme(theme)
+                editor.set_line_numbers_visible(show_line_numbers)
         if theme == "light":
             self.setStyleSheet("""
                 QMainWindow, QWidget { background: #F4F7FB; color: #1E293B; }
