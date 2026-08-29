@@ -639,9 +639,12 @@ class JsonEditor(QPlainTextEdit):
         return guides
 
     def paintEvent(self, event):
-        # Draw guides first so the editor text remains crisp above them.
+        # Paint the editor first, then draw guides on top so selection
+        # backgrounds do not hide the vertical dotted lines.
+        super().paintEvent(event)
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setClipRect(event.rect())
         for x1, y1, x2, y2, color in self._brace_guide_segments():
             pen = QPen(QColor(color), 1, Qt.PenStyle.DashLine)
             pen.setDashPattern([2, 3])
@@ -652,7 +655,6 @@ class JsonEditor(QPlainTextEdit):
             # segment is drawn back to the opening brace.
             painter.drawLine(x2, y1, x2, y2)
         painter.end()
-        super().paintEvent(event)
 
     def paint_gutter(self, event):
         painter = QPainter(self.gutter)
