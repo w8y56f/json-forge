@@ -214,6 +214,17 @@ def search_option_icon(kind: str) -> QIcon:
         painter.drawLine(3, 17, 19, 17)
         painter.drawLine(3, 14, 3, 19)
         painter.drawLine(19, 14, 19, 19)
+    elif kind == "close":
+        pen = QPen(
+            QColor("#64748B"),
+            2.4,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        painter.setPen(pen)
+        painter.drawLine(5, 5, 17, 17)
+        painter.drawLine(17, 5, 5, 17)
     else:
         pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
@@ -1438,7 +1449,7 @@ class JsonWindow(QMainWindow):
         self.search_down_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
         self.search_down_button.setToolTip("下一个匹配（Enter）")
         self.search_close_button = QToolButton()
-        self.search_close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        self.search_close_button.setIcon(search_option_icon("close"))
         self.search_close_button.setToolTip("关闭查找（Esc）")
 
         for button in (
