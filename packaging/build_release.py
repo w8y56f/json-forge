@@ -27,6 +27,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 
@@ -224,11 +225,17 @@ def build(target: str, output_root: Path, runtime_url: str | None = None) -> Pat
     }
     (bundle / "runtime-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    archive_path = output_root / f"{bundle.name}.tar.gz"
+    archive_suffix = ".zip" if target.startswith("windows") else ".tar.gz"
+    archive_path = output_root / f"{bundle.name}{archive_suffix}"
     if archive_path.exists():
         archive_path.unlink()
-    with tarfile.open(archive_path, "w:gz") as output_archive:
-        output_archive.add(bundle, arcname=bundle.name)
+    if target.startswith("windows"):
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as output_archive:
+            for path in bundle.rglob("*"):
+                output_archive.write(path, path.relative_to(output_root))
+    else:
+        with tarfile.open(archive_path, "w:gz") as output_archive:
+            output_archive.add(bundle, arcname=bundle.name)
     print(f"Built directory: {bundle}")
     print(f"Built archive:   {archive_path}")
     return bundle
