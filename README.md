@@ -19,6 +19,7 @@
 - 非空标签关闭前确认；“设置 → 更多设置 → General”可控制退出确认提示
 - “Tab样式”可在默认的“实用模式”和经典“扁平模式”之间切换并记住选择
 - General 中可切换中文/English 界面并自动记住选择，快捷键提示会适配运行平台
+- General 中可使用“恢复默认配置”，从 `config/settings.default.ini` 恢复全部设置
 - General 中可配置“禁止多实例”（默认开启），避免重复启动多个 JSON Forge 窗口
 - General 中可配置“收尾连接虚线”（默认开启），用于显示括号结束符对齐引导线
 - 编辑器默认显示行号，可在 General 中关闭；对象与数组支持点击 gutter 箭头折叠/展开
@@ -42,7 +43,7 @@ python3 -m venv .venv
 .venv/bin/python app.py
 ```
 
-用户配置默认保存在程序目录下的 `config/settings.ini`，会话快照保存在 `cache/session.json`；因此复制或迁移整个项目目录时会一并带走配置和上次会话。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。如果程序目录没有写权限，设置会自动回退到系统配置存储，会话文件则会在可写位置保存失败时保持原有文件不变。
+用户配置默认保存在程序目录下的 `config/settings.ini`，默认值集中在可提交的 `config/settings.default.ini`；会话快照保存在 `cache/session.json`。复制或迁移整个项目目录时会一并带走配置和上次会话。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。如果程序目录没有写权限，设置会自动回退到系统配置存储，会话文件则会在可写位置保存失败时保持原有文件不变。
 
 常用快捷键：`Ctrl/Cmd + Enter` 格式化，`Ctrl/Cmd + Shift + M` 紧凑压缩，
 `Ctrl/Cmd + T` 新建标签，`Ctrl/Cmd + W` 关闭当前标签。

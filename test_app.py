@@ -16,8 +16,11 @@ from app import (
     MoreSettingsDialog,
     acquire_instance_lock,
     create_app_settings,
+    default_settings_file_path,
+    default_settings_values,
     instance_lock_path,
     platform_shortcut_hint,
+    reset_settings_to_defaults,
     session_file_path,
     settings_file_path,
 )
@@ -50,6 +53,17 @@ class InstanceLockTests(unittest.TestCase):
 
 
 class SettingsStorageTests(unittest.TestCase):
+    def test_default_settings_file_contains_all_application_defaults(self):
+        defaults = default_settings_values(force_reload=True)
+        self.assertTrue(default_settings_file_path().is_file())
+        self.assertEqual(defaults.get("theme"), "light")
+        self.assertEqual(defaults.get("language"), "zh_CN")
+        self.assertEqual(defaults.get("tab_style"), "practical")
+        self.assertEqual(defaults.get("show_line_numbers"), "true")
+        self.assertEqual(defaults.get("confirm_exit"), "true")
+        self.assertEqual(defaults.get("single_instance"), "true")
+        self.assertEqual(defaults.get("brace_guides"), "true")
+
     def test_portable_ini_settings_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "config", "settings.ini")
@@ -71,6 +85,20 @@ class SettingsStorageTests(unittest.TestCase):
                     os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
                 else:
                     os.environ["JSON_STUDIO_SETTINGS_PATH"] = previous
+
+    def test_reset_settings_overwrites_current_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "settings.ini")
+            settings = QSettings(path, QSettings.Format.IniFormat)
+            settings.setValue("theme", "dark")
+            settings.setValue("language", "en")
+            settings.setValue("single_instance", False)
+            settings.sync()
+
+            self.assertTrue(reset_settings_to_defaults(settings))
+            self.assertEqual(settings.value("theme"), "light")
+            self.assertEqual(settings.value("language"), "zh_CN")
+            self.assertEqual(settings.value("single_instance"), "true")
 
 
 class SessionPersistenceTests(unittest.TestCase):
@@ -212,6 +240,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(dialog.language_combo.currentData(), "en")
         self.assertEqual(dialog.windowTitle(), "More Settings")
         self.assertEqual(dialog.brace_guides_checkbox.text(), "Closing Brace Guide")
+        self.assertEqual(dialog.restore_defaults_button.text(), "Restore Default Settings")
         self.assertTrue(dialog.single_instance_checkbox.isChecked())
         dialog.single_instance_checkbox.setChecked(False)
         dialog.brace_guides_checkbox.setChecked(False)

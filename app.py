@@ -46,6 +46,54 @@ def settings_file_path() -> Path:
     return Path(__file__).resolve().parent / "config" / "settings.ini"
 
 
+def default_settings_file_path() -> Path:
+    """Return the checked-in defaults file path."""
+    override = os.environ.get("JSON_STUDIO_DEFAULT_SETTINGS_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent / "config" / "settings.default.ini"
+
+
+_DEFAULT_SETTINGS_CACHE: dict[str, object] | None = None
+
+
+def default_settings_values(force_reload: bool = False) -> dict[str, object]:
+    """Read default values from settings.default.ini, cached per process."""
+    global _DEFAULT_SETTINGS_CACHE
+    if _DEFAULT_SETTINGS_CACHE is not None and not force_reload:
+        return dict(_DEFAULT_SETTINGS_CACHE)
+    values: dict[str, object] = {}
+    path = default_settings_file_path()
+    try:
+        if path.is_file():
+            defaults = QSettings(str(path), QSettings.Format.IniFormat)
+            defaults.setFallbacksEnabled(False)
+            defaults.sync()
+            if defaults.status() == QSettings.Status.NoError:
+                values = {key: defaults.value(key) for key in defaults.allKeys()}
+    except (OSError, RuntimeError):
+        values = {}
+    _DEFAULT_SETTINGS_CACHE = values
+    return dict(values)
+
+
+def default_setting(key: str, fallback=None):
+    """Return a setting's configured default, with a code-level fallback."""
+    return default_settings_values().get(key, fallback)
+
+
+def reset_settings_to_defaults(settings: QSettings) -> bool:
+    """Replace all current settings with settings.default.ini values."""
+    defaults = default_settings_values(force_reload=True)
+    if not defaults:
+        return False
+    settings.clear()
+    for key, value in defaults.items():
+        settings.setValue(key, value)
+    settings.sync()
+    return settings.status() == QSettings.Status.NoError
+
+
 def session_file_path() -> Path:
     """Return the portable last-session snapshot path."""
     override = os.environ.get("JSON_STUDIO_SESSION_PATH")
@@ -108,6 +156,8 @@ def create_app_settings() -> QSettings:
 
         settings = QSettings(str(path), QSettings.Format.IniFormat)
         if was_missing:
+            for key, value in default_settings_values().items():
+                settings.setValue(key, value)
             legacy = _legacy_settings()
             for key in legacy.allKeys():
                 settings.setValue(key, legacy.value(key))
@@ -243,32 +293,45 @@ class MoreSettingsDialog(QDialog):
         self.tab_style_combo = QComboBox()
         self.tab_style_combo.addItem(tr("实用模式", "Practical"), "practical")
         self.tab_style_combo.addItem(tr("扁平模式", "Flat"), "flat")
-        saved_tab_style = settings.value("tab_style", "practical")
+        saved_tab_style = settings.value("tab_style", default_setting("tab_style", "practical"))
         selected_index = self.tab_style_combo.findData(saved_tab_style)
         self.tab_style_combo.setCurrentIndex(max(0, selected_index))
         form.addRow(tr("Tab样式：", "Tab style:"), self.tab_style_combo)
         self.language_combo = QComboBox()
         self.language_combo.addItem("中文", "zh_CN")
         self.language_combo.addItem("English", "en")
-        saved_language = settings.value("language", "zh_CN")
+        saved_language = settings.value("language", default_setting("language", "zh_CN"))
         language_index = self.language_combo.findData(saved_language)
         self.language_combo.setCurrentIndex(max(0, language_index))
         form.addRow(tr("语言：", "Language:"), self.language_combo)
         general_layout.addLayout(form)
         self.line_numbers_checkbox = QCheckBox(tr("显示行号", "Show line numbers"))
-        self.line_numbers_checkbox.setChecked(setting_as_bool(settings, "show_line_numbers", True))
+        self.line_numbers_checkbox.setChecked(
+            setting_as_bool(settings, "show_line_numbers", default_setting("show_line_numbers", True))
+        )
         general_layout.addWidget(self.line_numbers_checkbox)
         self.confirm_exit_checkbox = QCheckBox(tr("退出程序时提示确认", "Confirm before exiting"))
-        self.confirm_exit_checkbox.setChecked(setting_as_bool(settings, "confirm_exit", True))
+        self.confirm_exit_checkbox.setChecked(
+            setting_as_bool(settings, "confirm_exit", default_setting("confirm_exit", True))
+        )
         general_layout.addWidget(self.confirm_exit_checkbox)
         self.single_instance_checkbox = QCheckBox(
             tr("禁止多实例（仅允许打开一个窗口）", "Prevent multiple instances (allow one window)")
         )
-        self.single_instance_checkbox.setChecked(setting_as_bool(settings, "single_instance", True))
+        self.single_instance_checkbox.setChecked(
+            setting_as_bool(settings, "single_instance", default_setting("single_instance", True))
+        )
         general_layout.addWidget(self.single_instance_checkbox)
         self.brace_guides_checkbox = QCheckBox(tr("收尾连接虚线", "Closing Brace Guide"))
-        self.brace_guides_checkbox.setChecked(setting_as_bool(settings, "brace_guides", True))
+        self.brace_guides_checkbox.setChecked(
+            setting_as_bool(settings, "brace_guides", default_setting("brace_guides", True))
+        )
         general_layout.addWidget(self.brace_guides_checkbox)
+        self.restore_defaults_button = QPushButton(
+            tr("恢复默认配置", "Restore Default Settings")
+        )
+        self.restore_defaults_button.clicked.connect(self.restore_defaults)
+        general_layout.addWidget(self.restore_defaults_button)
         general_layout.addStretch()
         tabs.addTab(general, "General")
         layout.addWidget(tabs)
@@ -289,6 +352,83 @@ class MoreSettingsDialog(QDialog):
         self.settings.setValue("brace_guides", self.brace_guides_checkbox.isChecked())
         self.settings.sync()
         super().accept()
+
+    def _load_controls_from_settings(self):
+        tab_style = self.settings.value("tab_style", default_setting("tab_style", "practical"))
+        tab_style_index = self.tab_style_combo.findData(tab_style)
+        self.tab_style_combo.setCurrentIndex(max(0, tab_style_index))
+        language = self.settings.value("language", default_setting("language", "zh_CN"))
+        language_index = self.language_combo.findData(language)
+        self.language_combo.setCurrentIndex(max(0, language_index))
+        self.line_numbers_checkbox.setChecked(
+            setting_as_bool(
+                self.settings,
+                "show_line_numbers",
+                default_setting("show_line_numbers", True),
+            )
+        )
+        self.confirm_exit_checkbox.setChecked(
+            setting_as_bool(
+                self.settings,
+                "confirm_exit",
+                default_setting("confirm_exit", True),
+            )
+        )
+        self.single_instance_checkbox.setChecked(
+            setting_as_bool(
+                self.settings,
+                "single_instance",
+                default_setting("single_instance", True),
+            )
+        )
+        self.brace_guides_checkbox.setChecked(
+            setting_as_bool(
+                self.settings,
+                "brace_guides",
+                default_setting("brace_guides", True),
+            )
+        )
+
+    def restore_defaults(self):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(localized(self.language, "恢复默认配置", "Restore Default Settings"))
+        box.setText(localized(
+            self.language,
+            "确定要恢复默认配置吗？",
+            "Restore all settings to their defaults?",
+        ))
+        box.setInformativeText(localized(
+            self.language,
+            "当前设置将被 settings.default.ini 中的值覆盖。",
+            "Current settings will be replaced with values from settings.default.ini.",
+        ))
+        cancel_button = box.addButton(
+            localized(self.language, "取消", "Cancel"),
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        restore_button = box.addButton(
+            localized(self.language, "确认恢复", "Restore"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        if box.clickedButton() is not restore_button:
+            return
+
+        if not reset_settings_to_defaults(self.settings):
+            QMessageBox.warning(
+                self,
+                localized(self.language, "恢复失败", "Restore Failed"),
+                localized(
+                    self.language,
+                    "未找到有效的 config/settings.default.ini。",
+                    "A valid config/settings.default.ini was not found.",
+                ),
+            )
+            return
+        self._load_controls_from_settings()
 
 
 class JsonHighlighter(QSyntaxHighlighter):
@@ -856,10 +996,10 @@ class JsonWindow(QMainWindow):
         self._session_save_timer.setInterval(700)
         self._session_save_timer.timeout.connect(self._save_session_if_dirty)
         self.settings = create_app_settings()
-        self.theme = self.settings.value("theme", "light")
+        self.theme = self.settings.value("theme", default_setting("theme", "light"))
         if self.theme not in ("light", "dark"):
             self.theme = "light"
-        self.language = self.settings.value("language", "zh_CN")
+        self.language = self.settings.value("language", default_setting("language", "zh_CN"))
         if self.language not in ("zh_CN", "en"):
             self.language = "zh_CN"
         self.default_hint = platform_shortcut_hint(language=self.language)
@@ -1380,9 +1520,19 @@ class JsonWindow(QMainWindow):
     def _create_editor(self) -> JsonEditor:
         editor = JsonEditor(
             self.theme,
-            setting_as_bool(self.settings, "show_line_numbers", True),
+            setting_as_bool(
+                self.settings,
+                "show_line_numbers",
+                default_setting("show_line_numbers", True),
+            ),
         )
-        editor.set_brace_guides_visible(setting_as_bool(self.settings, "brace_guides", True))
+        editor.set_brace_guides_visible(
+            setting_as_bool(
+                self.settings,
+                "brace_guides",
+                default_setting("brace_guides", True),
+            )
+        )
         editor.setObjectName("editor")
         editor.setPlaceholderText(self.tr(
             '在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容',
@@ -1620,11 +1770,20 @@ class JsonWindow(QMainWindow):
     def show_more_settings(self):
         dialog = MoreSettingsDialog(self.settings, self.language, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.apply_language(self.settings.value("language", "zh_CN"))
-            brace_guides_visible = setting_as_bool(self.settings, "brace_guides", True)
+            self.apply_language(
+                self.settings.value("language", default_setting("language", "zh_CN"))
+            )
+            brace_guides_visible = setting_as_bool(
+                self.settings,
+                "brace_guides",
+                default_setting("brace_guides", True),
+            )
             for index in range(self.editor_stack.count()):
                 self.editor_stack.widget(index).set_brace_guides_visible(brace_guides_visible)
-            self.apply_theme(self.theme)
+            theme = self.settings.value("theme", default_setting("theme", "light"))
+            if theme not in ("light", "dark"):
+                theme = "light"
+            self.apply_theme(theme)
 
     def show_about(self):
         box = QMessageBox(self)
@@ -1653,7 +1812,11 @@ class JsonWindow(QMainWindow):
         return box.clickedButton() is exit_button
 
     def closeEvent(self, event):
-        if not setting_as_bool(self.settings, "confirm_exit", True) or self._confirm_exit():
+        if not setting_as_bool(
+            self.settings,
+            "confirm_exit",
+            default_setting("confirm_exit", True),
+        ) or self._confirm_exit():
             self._session_save_timer.stop()
             self._save_session(force=True)
             event.accept()
@@ -2112,7 +2275,11 @@ class JsonWindow(QMainWindow):
         self.dark_action.setChecked(theme == "dark")
         self.light_action.setChecked(theme == "light")
         if hasattr(self, "editor_stack"):
-            show_line_numbers = setting_as_bool(self.settings, "show_line_numbers", True)
+            show_line_numbers = setting_as_bool(
+                self.settings,
+                "show_line_numbers",
+                default_setting("show_line_numbers", True),
+            )
             for index in range(self.editor_stack.count()):
                 editor = self.editor_stack.widget(index)
                 editor.json_highlighter.set_theme(theme)
@@ -2221,7 +2388,7 @@ class JsonWindow(QMainWindow):
         self._apply_tab_style_override(theme)
 
     def _apply_tab_style_override(self, theme: str):
-        tab_style = self.settings.value("tab_style", "practical")
+        tab_style = self.settings.value("tab_style", default_setting("tab_style", "practical"))
         if tab_style not in ("practical", "flat"):
             tab_style = "practical"
         self.tab_style = tab_style
@@ -2296,10 +2463,14 @@ def main():
     app.setStyle("Fusion")
     startup_settings = create_app_settings()
     instance_lock = None
-    if setting_as_bool(startup_settings, "single_instance", True):
+    if setting_as_bool(
+        startup_settings,
+        "single_instance",
+        default_setting("single_instance", True),
+    ):
         instance_lock, already_running = acquire_instance_lock()
         if already_running:
-            language = startup_settings.value("language", "zh_CN")
+            language = startup_settings.value("language", default_setting("language", "zh_CN"))
             QMessageBox.information(
                 None,
                 APP_NAME,
