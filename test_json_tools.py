@@ -2,7 +2,7 @@ import unittest
 
 from json_tools import (
     JsonToolError, parse_json_like, path_at_position, render_json, transform,
-    value_stats,
+    searchable_spans, value_stats,
 )
 
 
@@ -51,6 +51,12 @@ class JsonToolsTest(unittest.TestCase):
         parsed = parse_json_like("{'name': \"张三\", 'age': 30}")
         self.assertFalse(parsed.mixed)
         self.assertEqual(parsed.key_styles, frozenset({"single"}))
+
+    def test_searchable_key_and_value_spans(self):
+        text = '{"name":"Alice", age:30, \'city\':"广州"}'
+        keys, values = searchable_spans(text)
+        self.assertEqual([text[start:end] for start, end in keys], ['"name"', 'age', "'city'"])
+        self.assertEqual([text[start:end] for start, end in values], ['"Alice"', '30', '"广州"'])
 
     def test_paths(self):
         text, *_ = transform('{"user":{"items":[{"name":"Alice"}]}}')

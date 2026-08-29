@@ -2,23 +2,59 @@ from __future__ import annotations
 
 import sys
 import platform
+import re
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRegularExpression, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QAction, QActionGroup, QColor, QFont, QKeySequence, QPainter, QPolygon,
-    QShortcut, QTextCharFormat, QSyntaxHighlighter,
+    QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
+    QPixmap, QPolygon, QShortcut, QTextCharFormat, QTextCursor, QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-    QFrame, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QMenu, QSizePolicy, QStackedWidget, QStatusBar, QTabBar,
-    QTabWidget, QToolButton, QToolTip, QVBoxLayout, QWidget, QPlainTextEdit,
+    QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPushButton, QMenu, QSizePolicy, QStackedWidget, QStatusBar,
+    QStyle, QTabBar, QTabWidget, QTextEdit, QToolButton, QToolTip, QVBoxLayout,
+    QWidget, QPlainTextEdit,
 )
 
-from json_tools import JsonToolError, parse_json_like, path_at_position, render_json, value_stats
+from json_tools import (
+    JsonToolError, parse_json_like, path_at_position, render_json,
+    searchable_spans, value_stats,
+)
 
 
 APP_VERSION = "v1.0.0"
+
+
+def search_option_icon(kind: str) -> QIcon:
+    """Create compact, theme-neutral icons for search option buttons."""
+    pixmap = QPixmap(22, 22)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#64748B"), 1.4)
+    painter.setPen(pen)
+    if kind == "case":
+        font = QFont("Sans Serif", 8)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "Aa")
+    elif kind == "word":
+        font = QFont("Sans Serif", 7)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect().adjusted(2, 0, -2, -2), Qt.AlignmentFlag.AlignCenter, "ab")
+        painter.drawLine(3, 17, 19, 17)
+        painter.drawLine(3, 14, 3, 19)
+        painter.drawLine(19, 14, 19, 19)
+    else:
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(4, 5, 14, 12)
+        painter.drawLine(7, 9, 15, 9)
+        painter.drawLine(7, 13, 13, 13)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class DragBar(QFrame):
@@ -356,11 +392,24 @@ class JsonEditor(QPlainTextEdit):
         self.gutter.update()
         self.foldStateChanged.emit(bool(self.collapsed_blocks))
 
+    def reveal_block(self, block_number: int):
+        containing = {
+            start for start in self.collapsed_blocks
+            if start < block_number <= self.fold_regions.get(start, start)
+        }
+        if containing:
+            self.collapsed_blocks.difference_update(containing)
+            self._apply_fold_visibility()
+
 
 class JsonWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.next_tab_number = 1
+        self.search_matches: list[tuple[int, int]] = []
+        self.search_index = -1
+        self.search_selection_range: tuple[int, int] | None = None
+        self.initial_search_selection: tuple[int, int] | None = None
         self.settings = QSettings("LocalTools", "JSON Studio")
         self.theme = self.settings.value("theme", "dark")
         if self.theme not in ("light", "dark"):
@@ -530,11 +579,13 @@ class JsonWindow(QMainWindow):
 
         self.editor_stack = QStackedWidget()
         self.editor_stack.setObjectName("editorStack")
-        editor_container = QWidget()
-        editor_layout = QVBoxLayout(editor_container)
+        self.editor_container = QWidget()
+        editor_layout = QVBoxLayout(self.editor_container)
         editor_layout.setContentsMargins(20, 12, 20, 0)
         editor_layout.addWidget(self.editor_stack)
-        layout.addWidget(editor_container, 1)
+        layout.addWidget(self.editor_container, 1)
+        self._build_search_bar()
+        self.editor_container.installEventFilter(self)
 
         self.hint = QLabel(self.default_hint)
         self.hint.setObjectName("hint")
@@ -563,6 +614,93 @@ class JsonWindow(QMainWindow):
         status.addPermanentWidget(self.position_label)
         self.setStatusBar(status)
 
+    def _build_search_bar(self):
+        self.search_bar = QFrame(self.editor_container)
+        self.search_bar.setObjectName("searchBar")
+        self.search_bar.setFixedHeight(43)
+        search_layout = QHBoxLayout(self.search_bar)
+        search_layout.setContentsMargins(7, 5, 7, 5)
+        search_layout.setSpacing(3)
+
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("searchInput")
+        self.search_input.setPlaceholderText("查找")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumWidth(180)
+        self.search_input.installEventFilter(self)
+        self.match_label = QLabel("0 of 0")
+        self.match_label.setObjectName("matchCount")
+        self.match_label.setMinimumWidth(58)
+        self.match_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.case_button = QToolButton()
+        self.case_button.setIcon(search_option_icon("case"))
+        self.case_button.setToolTip("大小写敏感")
+        self.case_button.setCheckable(True)
+        self.case_button.setObjectName("searchOption")
+        self.word_button = QToolButton()
+        self.word_button.setIcon(search_option_icon("word"))
+        self.word_button.setToolTip("Whole Word")
+        self.word_button.setCheckable(True)
+        self.word_button.setObjectName("searchOption")
+        self.selection_button = QToolButton()
+        self.selection_button.setIcon(search_option_icon("selection"))
+        self.selection_button.setToolTip("Find in Selection")
+        self.selection_button.setCheckable(True)
+        self.selection_button.setObjectName("searchOption")
+
+        self.search_scope = QComboBox()
+        self.search_scope.setObjectName("searchScope")
+        self.search_scope.addItem("都搜索", "all")
+        self.search_scope.addItem("仅属性名", "keys")
+        self.search_scope.addItem("仅属性值", "values")
+
+        self.search_up_button = QToolButton()
+        self.search_up_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        self.search_up_button.setToolTip("上一个匹配（Shift+Enter）")
+        self.search_down_button = QToolButton()
+        self.search_down_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        self.search_down_button.setToolTip("下一个匹配（Enter）")
+        self.search_close_button = QToolButton()
+        self.search_close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        self.search_close_button.setToolTip("关闭查找（Esc）")
+
+        for button in (
+            self.case_button, self.word_button, self.selection_button,
+            self.search_up_button, self.search_down_button, self.search_close_button,
+        ):
+            button.setFixedSize(28, 28)
+
+        for widget in (
+            self.search_input, self.match_label, self.case_button, self.word_button,
+            self.selection_button, self.search_scope, self.search_up_button,
+            self.search_down_button, self.search_close_button,
+        ):
+            search_layout.addWidget(widget)
+        self.search_bar.hide()
+
+    def eventFilter(self, watched, event):
+        if watched is self.editor_container and event.type() == QEvent.Type.Resize:
+            self._position_search_bar()
+        if watched is self.search_input and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                direction = -1 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+                self.navigate_search(direction)
+                return True
+        return super().eventFilter(watched, event)
+
+    def _position_search_bar(self):
+        if not hasattr(self, "search_bar"):
+            return
+        width = min(690, max(560, self.editor_container.width() - 50))
+        self.search_bar.setGeometry(
+            self.editor_container.width() - width - 25,
+            15,
+            width,
+            self.search_bar.height(),
+        )
+        self.search_bar.raise_()
+
     def _connect(self):
         self.format_button.clicked.connect(lambda: self.apply_transform(False, "double"))
         self.compact_button.clicked.connect(lambda: self.apply_transform(True, "double"))
@@ -585,10 +723,20 @@ class JsonWindow(QMainWindow):
         self.tab_bar.tabCloseRequested.connect(self.close_tab)
         self.tab_bar.tabBarDoubleClicked.connect(self.rename_tab)
         self.tab_bar.tabMoved.connect(self.move_tab)
+        self.search_input.textChanged.connect(lambda: self.perform_search())
+        self.case_button.toggled.connect(lambda: self.perform_search())
+        self.word_button.toggled.connect(lambda: self.perform_search())
+        self.selection_button.toggled.connect(self._toggle_find_in_selection)
+        self.search_scope.currentIndexChanged.connect(lambda: self.perform_search())
+        self.search_up_button.clicked.connect(lambda: self.navigate_search(-1))
+        self.search_down_button.clicked.connect(lambda: self.navigate_search(1))
+        self.search_close_button.clicked.connect(self.close_search)
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=lambda: self.apply_transform(False, "double"))
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.apply_transform(True, "double"))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.add_tab)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
+        QShortcut(QKeySequence.StandardKey.Find, self, activated=self.open_search)
+        QShortcut(QKeySequence("Escape"), self, activated=self.close_search)
 
     def _create_editor(self) -> JsonEditor:
         editor = JsonEditor(
@@ -632,6 +780,13 @@ class JsonWindow(QMainWindow):
             self._refresh_active_status()
             self._update_tab_navigation()
             self._update_fold_button()
+            if self.search_bar.isVisible():
+                self.search_selection_range = None
+                self.initial_search_selection = None
+                self.selection_button.blockSignals(True)
+                self.selection_button.setChecked(False)
+                self.selection_button.blockSignals(False)
+                self.perform_search()
 
     def _fold_state_changed(self, editor: JsonEditor):
         if editor is self.editor:
@@ -762,6 +917,149 @@ class JsonWindow(QMainWindow):
         else:
             event.ignore()
 
+    def open_search(self):
+        if self.search_bar.isVisible():
+            self.search_input.setFocus()
+            self.search_input.selectAll()
+            return
+        cursor = self.editor.textCursor()
+        self.initial_search_selection = (
+            (cursor.selectionStart(), cursor.selectionEnd()) if cursor.hasSelection() else None
+        )
+        selected = cursor.selectedText().replace("\u2029", "\n")
+        self.search_bar.show()
+        self._position_search_bar()
+        self.search_bar.raise_()
+        if selected and "\n" not in selected:
+            self.search_input.setText(selected)
+        else:
+            self.perform_search()
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+
+    def close_search(self):
+        if not hasattr(self, "search_bar") or not self.search_bar.isVisible():
+            return
+        self.search_bar.hide()
+        self.search_matches = []
+        self.search_index = -1
+        self.search_selection_range = None
+        self.initial_search_selection = None
+        self.selection_button.blockSignals(True)
+        self.selection_button.setChecked(False)
+        self.selection_button.blockSignals(False)
+        self.editor.setExtraSelections([])
+        self.editor.setFocus()
+
+    def _toggle_find_in_selection(self, checked: bool):
+        if checked:
+            selection = self.initial_search_selection
+            if selection is None:
+                cursor = self.editor.textCursor()
+                if cursor.hasSelection():
+                    selection = (cursor.selectionStart(), cursor.selectionEnd())
+            if selection is None or selection[0] == selection[1]:
+                self.selection_button.blockSignals(True)
+                self.selection_button.setChecked(False)
+                self.selection_button.blockSignals(False)
+                self._flash("请先在编辑器中选择搜索范围")
+                return
+            self.search_selection_range = selection
+        else:
+            self.search_selection_range = None
+        self.perform_search()
+
+    @staticmethod
+    def _is_word_character(char: str) -> bool:
+        return bool(char) and (char.isalnum() or char == "_")
+
+    def perform_search(self):
+        if not self.search_bar.isVisible():
+            return
+        editor = self.editor
+        text = editor.toPlainText()
+        query = self.search_input.text()
+        self.search_matches = []
+        self.search_index = -1
+        if not query:
+            self.match_label.setText("0 of 0")
+            editor.setExtraSelections([])
+            return
+
+        flags = 0 if self.case_button.isChecked() else re.IGNORECASE
+        pattern = re.compile(re.escape(query), flags)
+        scope = self.search_scope.currentData()
+        allowed: list[tuple[int, int]] | None = None
+        if scope != "all":
+            key_spans, value_spans = searchable_spans(text)
+            allowed = key_spans if scope == "keys" else value_spans
+
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            if self.word_button.isChecked():
+                before = text[start - 1] if start else ""
+                after = text[end] if end < len(text) else ""
+                if self._is_word_character(before) or self._is_word_character(after):
+                    continue
+            if self.search_selection_range:
+                range_start, range_end = self.search_selection_range
+                if start < range_start or end > range_end:
+                    continue
+            if allowed is not None and not any(start >= left and end <= right for left, right in allowed):
+                continue
+            self.search_matches.append((start, end))
+
+        if self.search_matches:
+            cursor_position = editor.textCursor().selectionStart()
+            self.search_index = next(
+                (index for index, (start, _) in enumerate(self.search_matches) if start >= cursor_position),
+                0,
+            )
+            self._select_search_match()
+        else:
+            self.match_label.setText("0 of 0")
+            editor.setExtraSelections([])
+
+    def navigate_search(self, offset: int):
+        if not self.search_matches:
+            self.perform_search()
+            if not self.search_matches:
+                return
+        self.search_index = (self.search_index + offset) % len(self.search_matches)
+        self._select_search_match()
+
+    def _select_search_match(self):
+        if not self.search_matches or self.search_index < 0:
+            return
+        editor = self.editor
+        start, end = self.search_matches[self.search_index]
+        block_number = editor.document().findBlock(start).blockNumber()
+        editor.reveal_block(block_number)
+        cursor = QTextCursor(editor.document())
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        editor.centerCursor()
+        self.match_label.setText(f"{self.search_index + 1} of {len(self.search_matches)}")
+        self._update_search_highlights()
+
+    def _update_search_highlights(self):
+        editor = self.editor
+        selections: list[QTextEdit.ExtraSelection] = []
+        for index, (start, end) in enumerate(self.search_matches):
+            selection = QTextEdit.ExtraSelection()
+            cursor = QTextCursor(editor.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            selection.cursor = cursor
+            color = "#FB923C" if index == self.search_index else "#FDE68A"
+            if self.theme == "dark" and index != self.search_index:
+                color = "#A16207"
+            selection.format.setBackground(QColor(color))
+            selection.format.setForeground(QColor("#111827"))
+            selections.append(selection)
+        editor.setExtraSelections(selections)
+
     def paste(self):
         text = QApplication.clipboard().text()
         if text:
@@ -840,6 +1138,8 @@ class JsonWindow(QMainWindow):
         if editor is self.editor:
             self.stats_label.setText(editor.json_stats_text)
             self.update_path()
+            if self.search_bar.isVisible():
+                self.perform_search()
 
     def _editor_cursor_changed(self, editor: QPlainTextEdit):
         if editor is self.editor:
@@ -904,6 +1204,19 @@ class JsonWindow(QMainWindow):
                 QToolButton#tabScrollLeft, QToolButton#tabScrollRight {
                     font-size: 15px; font-weight: 700; padding: 2px 7px; min-width: 20px;
                 }
+                QFrame#searchBar {
+                    background: #FFFFFF; border: 1px solid #94A3B8;
+                    border-radius: 6px;
+                }
+                QFrame#searchBar QLineEdit {
+                    background: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1;
+                    border-radius: 4px; padding: 5px 7px;
+                }
+                QFrame#searchBar QLineEdit:focus { border-color: #0D9488; }
+                QFrame#searchBar QToolButton { padding: 2px; border-radius: 4px; }
+                QFrame#searchBar QToolButton:checked { background: #99F6E4; border-color: #0D9488; }
+                QFrame#searchBar QLabel#matchCount { color: #64748B; font-size: 11px; }
+                QFrame#searchBar QComboBox { padding: 4px 6px; min-width: 82px; }
                 QFrame#toolbar { background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; }
                 QPushButton, QToolButton {
                     background: #F8FAFC; color: #334155; border: 1px solid #CBD5E1;
@@ -942,6 +1255,19 @@ class JsonWindow(QMainWindow):
             QToolButton#tabScrollLeft, QToolButton#tabScrollRight {
                 font-size: 15px; font-weight: 700; padding: 2px 7px; min-width: 20px;
             }
+            QFrame#searchBar {
+                background: #17243A; border: 1px solid #3D5272;
+                border-radius: 6px;
+            }
+            QFrame#searchBar QLineEdit {
+                background: #0E1728; color: #D7E0EC; border: 1px solid #3D5272;
+                border-radius: 4px; padding: 5px 7px;
+            }
+            QFrame#searchBar QLineEdit:focus { border-color: #2DD4BF; }
+            QFrame#searchBar QToolButton { padding: 2px; border-radius: 4px; }
+            QFrame#searchBar QToolButton:checked { background: #0F766E; border-color: #2DD4BF; }
+            QFrame#searchBar QLabel#matchCount { color: #AAB8CA; font-size: 11px; }
+            QFrame#searchBar QComboBox { padding: 4px 6px; min-width: 82px; }
             QFrame#toolbar { background: #111B2E; border: 1px solid #243149; border-radius: 10px; }
             QPushButton, QToolButton {
                 background: #17243A; color: #C9D5E5; border: 1px solid #2B3A54;
@@ -1034,6 +1360,8 @@ class JsonWindow(QMainWindow):
                 QTabBar::tab:hover:!selected { background: #30415A; color: #F1F5F9; }
             """
         self.setStyleSheet(self.styleSheet() + tab_style_sheet)
+        if hasattr(self, "search_bar") and self.search_bar.isVisible():
+            self._update_search_highlights()
 
 
 def main():

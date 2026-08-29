@@ -430,3 +430,57 @@ def value_stats(value: Any) -> tuple[int, int]:
 
     walk(value, 0)
     return count, max_depth
+
+
+def searchable_spans(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Return lexical spans for property names and scalar property values.
+
+    The scanner supports the same double-quoted, single-quoted and bare-key
+    forms as the editor. Quotes are included in spans so selected source text
+    can still be found when a scoped search is active.
+    """
+    keys: list[tuple[int, int]] = []
+    values: list[tuple[int, int]] = []
+    pos = 0
+    length = len(text)
+    number = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
+    identifier = re.compile(r"[A-Za-z_$][\w$]*", re.UNICODE)
+
+    while pos < length:
+        char = text[pos]
+        if char in "\"'":
+            start = pos
+            quote = char
+            pos += 1
+            escaped = False
+            while pos < length:
+                current = text[pos]
+                pos += 1
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == quote:
+                    break
+            end = pos
+            lookahead = end
+            while lookahead < length and text[lookahead].isspace():
+                lookahead += 1
+            (keys if lookahead < length and text[lookahead] == ":" else values).append((start, end))
+            continue
+        word = identifier.match(text, pos)
+        if word:
+            start, end = word.span()
+            lookahead = end
+            while lookahead < length and text[lookahead].isspace():
+                lookahead += 1
+            (keys if lookahead < length and text[lookahead] == ":" else values).append((start, end))
+            pos = end
+            continue
+        numeric = number.match(text, pos)
+        if numeric:
+            values.append(numeric.span())
+            pos = numeric.end()
+            continue
+        pos += 1
+    return keys, values
