@@ -660,22 +660,6 @@ class JsonWindow(QMainWindow):
                 QLabel#hint { font-size: 12px; padding-left: 4px; }
                 QLabel#hint[error="true"] { color: #BE123C; }
                 QFrame#dragBar, QFrame#tabRow { background: #E8EEF6; border: none; }
-                QTabBar::tab {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                                stop:0 #FFFFFF, stop:1 #D9E1EB);
-                    color: #475569;
-                    border-top: 1px solid #FFFFFF; border-left: 1px solid #FFFFFF;
-                    border-right: 2px solid #9AA9BB; border-bottom: 2px solid #9AA9BB;
-                    border-radius: 6px; min-width: 105px; max-width: 180px;
-                    padding: 7px 12px; margin-top: 0px; margin-bottom: 3px;
-                }
-                QTabBar::tab:selected {
-                    background: #D3DCE7; color: #0F172A;
-                    border-top: 2px solid #8797AA; border-left: 2px solid #8797AA;
-                    border-right: 1px solid #F8FAFC; border-bottom: 1px solid #F8FAFC;
-                    padding-top: 8px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 0px;
-                }
-                QTabBar::tab:hover:!selected { background: #F1F5F9; color: #1E293B; }
                 QToolButton#addTab { font-size: 16px; padding: 2px 9px; min-width: 44px; }
                 QToolButton#tabScrollLeft, QToolButton#tabScrollRight {
                     font-size: 15px; font-weight: 700; padding: 2px 7px; min-width: 20px;
@@ -714,22 +698,6 @@ class JsonWindow(QMainWindow):
             QLabel#hint { font-size: 12px; padding-left: 4px; }
             QLabel#hint[error="true"] { color: #FDA4AF; }
             QFrame#dragBar, QFrame#tabRow { background: #0F192B; border: none; }
-            QTabBar::tab {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                            stop:0 #2A3A52, stop:1 #17243A);
-                color: #C0CCDC;
-                border-top: 1px solid #53657E; border-left: 1px solid #53657E;
-                border-right: 2px solid #070C15; border-bottom: 2px solid #070C15;
-                border-radius: 6px; min-width: 105px; max-width: 180px;
-                padding: 7px 12px; margin-top: 0px; margin-bottom: 3px;
-            }
-            QTabBar::tab:selected {
-                background: #0A1220; color: #F8FAFC;
-                border-top: 2px solid #05080F; border-left: 2px solid #05080F;
-                border-right: 1px solid #40506A; border-bottom: 1px solid #40506A;
-                padding-top: 8px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 0px;
-            }
-            QTabBar::tab:hover:!selected { background: #30415A; color: #F1F5F9; }
             QToolButton#addTab { font-size: 16px; padding: 2px 9px; min-width: 44px; }
             QToolButton#tabScrollLeft, QToolButton#tabScrollRight {
                 font-size: 15px; font-weight: 700; padding: 2px 7px; min-width: 20px;
@@ -765,35 +733,67 @@ class JsonWindow(QMainWindow):
         if tab_style not in ("practical", "flat"):
             tab_style = "practical"
         self.tab_style = tab_style
-        if tab_style != "flat":
-            return
-        if theme == "light":
-            flat_style = """
+        if tab_style == "flat" and theme == "light":
+            tab_style_sheet = """
                 QTabBar::tab {
                     background: #E2E8F0; color: #475569;
                     border: 1px solid #CBD5E1; border-bottom: none;
                     border-top-left-radius: 8px; border-top-right-radius: 8px;
-                    border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;
                     min-width: 105px; max-width: 180px; padding: 7px 12px;
-                    margin: 0px;
                 }
                 QTabBar::tab:selected { background: #FFFFFF; color: #0F172A; }
                 QTabBar::tab:hover:!selected { background: #D5DEE9; }
             """
-        else:
-            flat_style = """
+        elif tab_style == "flat":
+            tab_style_sheet = """
                 QTabBar::tab {
                     background: #17243A; color: #91A2B8;
                     border: 1px solid #2B3A54; border-bottom: none;
                     border-top-left-radius: 8px; border-top-right-radius: 8px;
-                    border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;
                     min-width: 105px; max-width: 180px; padding: 7px 12px;
-                    margin: 0px;
                 }
                 QTabBar::tab:selected { background: #0E1728; color: #F8FAFC; }
                 QTabBar::tab:hover:!selected { background: #21314B; }
             """
-        self.setStyleSheet(self.styleSheet() + flat_style)
+        elif theme == "light":
+            tab_style_sheet = """
+                QTabBar::tab {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                stop:0 #FFFFFF, stop:1 #D9E1EB);
+                    color: #475569;
+                    border-top: 1px solid #FFFFFF; border-left: 1px solid #FFFFFF;
+                    border-right: 2px solid #9AA9BB; border-bottom: 2px solid #9AA9BB;
+                    border-radius: 6px; min-width: 105px; max-width: 180px;
+                    padding: 7px 12px; margin-top: 0px; margin-bottom: 3px;
+                }
+                QTabBar::tab:selected {
+                    background: #D3DCE7; color: #0F172A;
+                    border-top: 2px solid #8797AA; border-left: 2px solid #8797AA;
+                    border-right: 1px solid #F8FAFC; border-bottom: 1px solid #F8FAFC;
+                    padding-top: 8px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 0px;
+                }
+                QTabBar::tab:hover:!selected { background: #F1F5F9; color: #1E293B; }
+            """
+        else:
+            tab_style_sheet = """
+                QTabBar::tab {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                stop:0 #2A3A52, stop:1 #17243A);
+                    color: #C0CCDC;
+                    border-top: 1px solid #53657E; border-left: 1px solid #53657E;
+                    border-right: 2px solid #070C15; border-bottom: 2px solid #070C15;
+                    border-radius: 6px; min-width: 105px; max-width: 180px;
+                    padding: 7px 12px; margin-top: 0px; margin-bottom: 3px;
+                }
+                QTabBar::tab:selected {
+                    background: #0A1220; color: #F8FAFC;
+                    border-top: 2px solid #05080F; border-left: 2px solid #05080F;
+                    border-right: 1px solid #40506A; border-bottom: 1px solid #40506A;
+                    padding-top: 8px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 0px;
+                }
+                QTabBar::tab:hover:!selected { background: #30415A; color: #F1F5F9; }
+            """
+        self.setStyleSheet(self.styleSheet() + tab_style_sheet)
 
 
 def main():
