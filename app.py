@@ -400,8 +400,11 @@ class MoreSettingsDialog(QDialog):
         ))
         box.setInformativeText(localized(
             self.language,
-            "当前设置将被 settings.default.ini 中的值覆盖。",
-            "Current settings will be replaced with values from settings.default.ini.",
+            "当前设置将被 settings.default.ini 中的值覆盖。<br><br>"
+            '<span style="color:#DC2626;">点击“确认恢复”后立即覆盖，不需要继续点击“保存”</span>',
+            "Current settings will be replaced with values from settings.default.ini.<br><br>"
+            '<span style="color:#EF4444;">Click “Restore” to overwrite immediately; '
+            "you do not need to click “Save” afterward.</span>",
         ))
         cancel_button = box.addButton(
             localized(self.language, "取消", "Cancel"),
