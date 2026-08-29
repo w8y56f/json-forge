@@ -410,6 +410,8 @@ class JsonWindow(QMainWindow):
         self.search_index = -1
         self.search_selection_range: tuple[int, int] | None = None
         self.initial_search_selection: tuple[int, int] | None = None
+        self.search_candidate_selection: tuple[int, int] | None = None
+        self.selecting_search_match = False
         self.settings = QSettings("LocalTools", "JSON Studio")
         self.theme = self.settings.value("theme", "dark")
         if self.theme not in ("light", "dark"):
@@ -759,6 +761,7 @@ class JsonWindow(QMainWindow):
         editor.json_highlighter = JsonHighlighter(editor.document(), self.theme)
         editor.foldStateChanged.connect(lambda _collapsed, current=editor: self._fold_state_changed(current))
         editor.cursorPositionChanged.connect(lambda current=editor: self._editor_cursor_changed(current))
+        editor.selectionChanged.connect(lambda current=editor: self._editor_selection_changed(current))
         editor.textChanged.connect(lambda current=editor: self._editor_text_changed(current))
         return editor
 
@@ -783,6 +786,7 @@ class JsonWindow(QMainWindow):
             if self.search_bar.isVisible():
                 self.search_selection_range = None
                 self.initial_search_selection = None
+                self.search_candidate_selection = None
                 self.selection_button.blockSignals(True)
                 self.selection_button.setChecked(False)
                 self.selection_button.blockSignals(False)
@@ -926,6 +930,7 @@ class JsonWindow(QMainWindow):
         self.initial_search_selection = (
             (cursor.selectionStart(), cursor.selectionEnd()) if cursor.hasSelection() else None
         )
+        self.search_candidate_selection = self.initial_search_selection
         selected = cursor.selectedText().replace("\u2029", "\n")
         self.search_bar.show()
         self._position_search_bar()
@@ -945,6 +950,7 @@ class JsonWindow(QMainWindow):
         self.search_index = -1
         self.search_selection_range = None
         self.initial_search_selection = None
+        self.search_candidate_selection = None
         self.selection_button.blockSignals(True)
         self.selection_button.setChecked(False)
         self.selection_button.blockSignals(False)
@@ -953,7 +959,7 @@ class JsonWindow(QMainWindow):
 
     def _toggle_find_in_selection(self, checked: bool):
         if checked:
-            selection = self.initial_search_selection
+            selection = self.search_candidate_selection or self.initial_search_selection
             if selection is None:
                 cursor = self.editor.textCursor()
                 if cursor.hasSelection():
@@ -983,7 +989,7 @@ class JsonWindow(QMainWindow):
         self.search_index = -1
         if not query:
             self.match_label.setText("0 of 0")
-            editor.setExtraSelections([])
+            self._update_search_highlights()
             return
 
         flags = 0 if self.case_button.isChecked() else re.IGNORECASE
@@ -1018,7 +1024,7 @@ class JsonWindow(QMainWindow):
             self._select_search_match()
         else:
             self.match_label.setText("0 of 0")
-            editor.setExtraSelections([])
+            self._update_search_highlights()
 
     def navigate_search(self, offset: int):
         if not self.search_matches:
@@ -1038,7 +1044,11 @@ class JsonWindow(QMainWindow):
         cursor = QTextCursor(editor.document())
         cursor.setPosition(start)
         cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-        editor.setTextCursor(cursor)
+        self.selecting_search_match = True
+        try:
+            editor.setTextCursor(cursor)
+        finally:
+            self.selecting_search_match = False
         editor.centerCursor()
         self.match_label.setText(f"{self.search_index + 1} of {len(self.search_matches)}")
         self._update_search_highlights()
@@ -1046,6 +1056,16 @@ class JsonWindow(QMainWindow):
     def _update_search_highlights(self):
         editor = self.editor
         selections: list[QTextEdit.ExtraSelection] = []
+        if self.search_selection_range:
+            range_start, range_end = self.search_selection_range
+            range_selection = QTextEdit.ExtraSelection()
+            range_cursor = QTextCursor(editor.document())
+            range_cursor.setPosition(range_start)
+            range_cursor.setPosition(range_end, QTextCursor.MoveMode.KeepAnchor)
+            range_selection.cursor = range_cursor
+            range_color = "#1E3A5F" if self.theme == "dark" else "#DBEAFE"
+            range_selection.format.setBackground(QColor(range_color))
+            selections.append(range_selection)
         for index, (start, end) in enumerate(self.search_matches):
             selection = QTextEdit.ExtraSelection()
             cursor = QTextCursor(editor.document())
@@ -1144,6 +1164,18 @@ class JsonWindow(QMainWindow):
     def _editor_cursor_changed(self, editor: QPlainTextEdit):
         if editor is self.editor:
             self.update_path()
+
+    def _editor_selection_changed(self, editor: QPlainTextEdit):
+        if (
+            editor is not self.editor
+            or not self.search_bar.isVisible()
+            or self.selection_button.isChecked()
+            or self.selecting_search_match
+        ):
+            return
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            self.search_candidate_selection = (cursor.selectionStart(), cursor.selectionEnd())
 
     def _refresh_active_status(self):
         editor = self.editor
