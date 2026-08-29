@@ -2,14 +2,46 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
-from app import JsonEditor, JsonWindow, MoreSettingsDialog, platform_shortcut_hint
+from app import (
+    JsonEditor,
+    JsonWindow,
+    MoreSettingsDialog,
+    create_app_settings,
+    platform_shortcut_hint,
+    settings_file_path,
+)
+
+
+class SettingsStorageTests(unittest.TestCase):
+    def test_portable_ini_settings_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "config", "settings.ini")
+            previous = os.environ.get("JSON_STUDIO_SETTINGS_PATH")
+            os.environ["JSON_STUDIO_SETTINGS_PATH"] = path
+            try:
+                settings = create_app_settings()
+                settings.setValue("theme", "dark")
+                settings.setValue("language", "en")
+                settings.sync()
+
+                self.assertEqual(settings_file_path(), Path(path).resolve())
+                self.assertTrue(os.path.exists(path))
+                reopened = create_app_settings()
+                self.assertEqual(reopened.value("theme"), "dark")
+                self.assertEqual(reopened.value("language"), "en")
+            finally:
+                if previous is None:
+                    os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
+                else:
+                    os.environ["JSON_STUDIO_SETTINGS_PATH"] = previous
 
 
 class PlatformHintTests(unittest.TestCase):
@@ -39,17 +71,19 @@ class LanguageUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
         cls.settings_dir = tempfile.TemporaryDirectory()
-        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, cls.settings_dir.name)
+        cls.settings_path = os.path.join(cls.settings_dir.name, "settings.ini")
+        os.environ["JSON_STUDIO_SETTINGS_PATH"] = cls.settings_path
 
     @classmethod
     def tearDownClass(cls):
+        os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
         cls.settings_dir.cleanup()
 
     def setUp(self):
-        settings = QSettings("LocalTools", "JSON Studio")
+        settings = QSettings(self.settings_path, QSettings.Format.IniFormat)
         settings.clear()
         settings.setValue("confirm_exit", False)
+        settings.sync()
         self.window = JsonWindow()
 
     def tearDown(self):
@@ -276,6 +310,72 @@ class BraceMatchingTests(unittest.TestCase):
         self.editor.setTextCursor(cursor)
         self.app.processEvents()
         self.assertTrue(any(color == "#38BDF8" for _, _, _, _, color in self.editor._brace_guide_segments()))
+
+
+class BookmarkTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.settings_dir = tempfile.TemporaryDirectory()
+        cls.settings_path = os.path.join(cls.settings_dir.name, "settings.ini")
+        os.environ["JSON_STUDIO_SETTINGS_PATH"] = cls.settings_path
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
+        cls.settings_dir.cleanup()
+
+    def setUp(self):
+        self.editor = JsonEditor(theme="light", show_line_numbers=True)
+
+    def tearDown(self):
+        self.editor.deleteLater()
+        self.app.processEvents()
+
+    def test_bookmarks_toggle_and_click_in_gutter(self):
+        self.editor.resize(600, 240)
+        self.editor.show()
+        self.editor.setPlainText("one\ntwo\nthree")
+        self.app.processEvents()
+        block = self.editor.document().findBlockByNumber(1)
+        y = self.editor.blockBoundingGeometry(block).translated(self.editor.contentOffset()).center().y()
+
+        QTest.mouseClick(self.editor.gutter, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(6, int(y)))
+        self.assertEqual(self.editor.bookmark_block_numbers(), [1])
+        self.editor.set_bookmark(1)
+        self.assertEqual(self.editor.bookmark_block_numbers(), [])
+
+    def test_window_shortcuts_cycle_and_update_status(self):
+        settings = QSettings(self.settings_path, QSettings.Format.IniFormat)
+        settings.clear()
+        settings.setValue("confirm_exit", False)
+        settings.sync()
+        window = JsonWindow()
+        window.resize(700, 400)
+        window.show()
+        editor = window.editor
+        editor.setPlainText("one\ntwo\nthree\nfour")
+        editor.setFocus()
+        cursor = editor.textCursor()
+        cursor.setPosition(editor.document().findBlockByNumber(1).position())
+        editor.setTextCursor(cursor)
+        self.app.processEvents()
+
+        QTest.keyClick(editor, Qt.Key.Key_F2, Qt.KeyboardModifier.ControlModifier)
+        cursor.setPosition(editor.document().findBlockByNumber(3).position())
+        editor.setTextCursor(cursor)
+        QTest.keyClick(editor, Qt.Key.Key_F2, Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(editor.bookmark_block_numbers(), [1, 3])
+        QTest.keyClick(editor, Qt.Key.Key_F2)
+        self.app.processEvents()
+        self.assertEqual(editor.textCursor().blockNumber(), 1)
+        self.assertIn("1 / 2", window.bookmark_label.text())
+        QTest.keyClick(editor, Qt.Key.Key_F2, Qt.KeyboardModifier.ShiftModifier)
+        self.app.processEvents()
+        self.assertEqual(editor.textCursor().blockNumber(), 3)
+        window.deleteLater()
+        self.app.processEvents()
 
 
 if __name__ == "__main__":

@@ -3,11 +3,14 @@ from __future__ import annotations
 import sys
 import platform
 import re
+import os
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRegularExpression, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
-    QPixmap, QPolygon, QShortcut, QTextCharFormat, QTextCursor, QSyntaxHighlighter,
+    QPixmap, QPolygon, QShortcut, QTextBlockUserData, QTextCharFormat, QTextCursor,
+    QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
@@ -24,6 +27,53 @@ from json_tools import (
 
 
 APP_VERSION = "v1.0.0"
+SETTINGS_ORGANIZATION = "LocalTools"
+SETTINGS_APPLICATION = "JSON Studio"
+
+
+def settings_file_path() -> Path:
+    """Return the portable settings path next to the application source."""
+    override = os.environ.get("JSON_STUDIO_SETTINGS_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent / "config" / "settings.ini"
+
+
+def _legacy_settings() -> QSettings:
+    """Open the previous native settings store without global fallbacks."""
+    settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
+    settings.setFallbacksEnabled(False)
+    return settings
+
+
+def create_app_settings() -> QSettings:
+    """Create portable INI settings, migrating the previous store once.
+
+    If the application directory is read-only (for example, a protected
+    installation directory), the native QSettings store remains a safe
+    fallback so preferences can still be saved.
+    """
+    path = settings_file_path()
+    was_missing = not path.exists()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if not os.access(path, os.R_OK | os.W_OK):
+                raise OSError(f"settings file is not writable: {path}")
+        elif not os.access(path.parent, os.W_OK):
+            raise OSError(f"settings directory is not writable: {path.parent}")
+
+        settings = QSettings(str(path), QSettings.Format.IniFormat)
+        if was_missing:
+            legacy = _legacy_settings()
+            for key in legacy.allKeys():
+                settings.setValue(key, legacy.value(key))
+        settings.sync()
+        if settings.status() != QSettings.Status.NoError:
+            raise OSError(f"unable to write settings: {path}")
+        return settings
+    except (OSError, RuntimeError):
+        return QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
 
 
 def localized(language: str, chinese: str, english: str, **values) -> str:
@@ -253,11 +303,17 @@ class EditorGutter(QWidget):
         self.editor.gutter_mouse_press(event)
 
 
+class BookmarkData(QTextBlockUserData):
+    """Marker attached to a document block so bookmarks follow line edits."""
+
+
 class JsonEditor(QPlainTextEdit):
     """Plain-text editor with optional line numbers and JSON node folding."""
 
     foldStateChanged = Signal(bool)
+    bookmarksChanged = Signal()
     fold_column_width = 20
+    bookmark_column_width = 18
 
     def __init__(self, theme: str, show_line_numbers: bool, parent=None):
         super().__init__(parent)
@@ -291,12 +347,48 @@ class JsonEditor(QPlainTextEdit):
         self.brace_guides_visible = visible
         self.viewport().update()
 
+    def set_bookmark(self, block_number: int | None = None, marked: bool | None = None):
+        if block_number is None:
+            block_number = self.textCursor().blockNumber()
+        block = self.document().findBlockByNumber(block_number)
+        if not block.isValid():
+            return False
+        currently_marked = isinstance(block.userData(), BookmarkData)
+        new_value = not currently_marked if marked is None else marked
+        if new_value == currently_marked:
+            return currently_marked
+        block.setUserData(BookmarkData() if new_value else None)
+        self.gutter.update()
+        self.bookmarksChanged.emit()
+        return new_value
+
+    def bookmark_block_numbers(self) -> list[int]:
+        numbers = []
+        block = self.document().firstBlock()
+        while block.isValid():
+            if isinstance(block.userData(), BookmarkData):
+                numbers.append(block.blockNumber())
+            block = block.next()
+        return numbers
+
+    def clear_bookmarks(self):
+        changed = False
+        block = self.document().firstBlock()
+        while block.isValid():
+            if isinstance(block.userData(), BookmarkData):
+                block.setUserData(None)
+                changed = True
+            block = block.next()
+        if changed:
+            self.gutter.update()
+            self.bookmarksChanged.emit()
+
     def gutter_width(self) -> int:
         number_width = 0
         if self.show_line_numbers:
             digits = max(2, len(str(max(1, self.blockCount()))))
             number_width = self.fontMetrics().horizontalAdvance("9") * digits + 12
-        return number_width + self.fold_column_width
+        return self.bookmark_column_width + number_width + self.fold_column_width
 
     def _update_gutter_width(self, _=None):
         self.setViewportMargins(self.gutter_width(), 0, 0, 0)
@@ -381,16 +473,28 @@ class JsonEditor(QPlainTextEdit):
         block_number = block.blockNumber()
         top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
         bottom = top + round(self.blockBoundingRect(block).height())
-        number_area_width = self.gutter_width() - self.fold_column_width
+        number_area_width = self.gutter_width() - self.bookmark_column_width - self.fold_column_width
 
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 if self.show_line_numbers:
                     painter.setPen(number_color)
-                    painter.drawText(0, top, number_area_width - 4, self.fontMetrics().height(),
+                    painter.drawText(self.bookmark_column_width, top, number_area_width - 4, self.fontMetrics().height(),
                                      Qt.AlignmentFlag.AlignRight, str(block_number + 1))
+                if isinstance(block.userData(), BookmarkData):
+                    bookmark_color = QColor("#2563EB" if not dark else "#38BDF8")
+                    if block_number == self.textCursor().blockNumber():
+                        bookmark_color = QColor("#F97316" if not dark else "#FBBF24")
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(bookmark_color)
+                    bookmark_center_y = top + self.fontMetrics().height() // 2
+                    painter.drawEllipse(
+                        QPoint(self.bookmark_column_width // 2, bookmark_center_y),
+                        4,
+                        4,
+                    )
                 if block_number in self.fold_regions:
-                    center_x = number_area_width + self.fold_column_width // 2
+                    center_x = self.bookmark_column_width + number_area_width + self.fold_column_width // 2
                     center_y = top + self.fontMetrics().height() // 2
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(marker_color)
@@ -415,8 +519,22 @@ class JsonEditor(QPlainTextEdit):
     def gutter_mouse_press(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        x = event.position().x()
+        if x < self.bookmark_column_width:
+            y = event.position().y()
+            block = self.firstVisibleBlock()
+            top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+            while block.isValid():
+                height = round(self.blockBoundingRect(block).height())
+                if block.isVisible() and top <= y < top + height:
+                    self.set_bookmark(block.blockNumber())
+                    return
+                if block.isVisible():
+                    top += height
+                block = block.next()
+            return
         marker_start = self.gutter_width() - self.fold_column_width
-        if event.position().x() < marker_start:
+        if x < marker_start:
             return
         y = event.position().y()
         block = self.firstVisibleBlock()
@@ -680,7 +798,7 @@ class JsonWindow(QMainWindow):
         self.initial_search_selection: tuple[int, int] | None = None
         self.search_candidate_selection: tuple[int, int] | None = None
         self.selecting_search_match = False
-        self.settings = QSettings("LocalTools", "JSON Studio")
+        self.settings = create_app_settings()
         self.theme = self.settings.value("theme", "light")
         if self.theme not in ("light", "dark"):
             self.theme = "light"
@@ -885,9 +1003,11 @@ class JsonWindow(QMainWindow):
         self.copy_plain.setText("复制无 $")
         self.position_label = QLabel("行 1，列 1")
         self.stats_label = QLabel("等待输入")
+        self.bookmark_label = QLabel("书签 0 / 0")
         status.addWidget(self.path_label, 1)
         status.addWidget(self.copy_full)
         status.addWidget(self.copy_plain)
+        status.addWidget(self.bookmark_label)
         status.addPermanentWidget(self.stats_label)
         status.addPermanentWidget(self.position_label)
         self.setStatusBar(status)
@@ -1002,6 +1122,10 @@ class JsonWindow(QMainWindow):
         self.tab_bar.tabBarDoubleClicked.connect(self.rename_tab)
         self.tab_bar.tabMoved.connect(self.move_tab)
         self.tab_bar.customContextMenuRequested.connect(self.show_tab_context_menu)
+        for shortcut in ("Ctrl+F2", "Meta+F2"):
+            QShortcut(QKeySequence(shortcut), self, activated=self.toggle_bookmark)
+        QShortcut(QKeySequence("F2"), self, activated=lambda: self.navigate_bookmark(1))
+        QShortcut(QKeySequence("Shift+F2"), self, activated=lambda: self.navigate_bookmark(-1))
         self.search_input.textChanged.connect(lambda: self.perform_search())
         self.case_button.toggled.connect(lambda: self.perform_search())
         self.word_button.toggled.connect(lambda: self.perform_search())
@@ -1047,6 +1171,7 @@ class JsonWindow(QMainWindow):
         editor.json_highlighter = JsonHighlighter(editor.document(), self.theme)
         editor._update_brace_highlight()
         editor.foldStateChanged.connect(lambda _collapsed, current=editor: self._fold_state_changed(current))
+        editor.bookmarksChanged.connect(lambda current=editor: self._editor_bookmarks_changed(current))
         editor.cursorPositionChanged.connect(lambda current=editor: self._editor_cursor_changed(current))
         editor.selectionChanged.connect(lambda current=editor: self._editor_selection_changed(current))
         editor.textChanged.connect(lambda current=editor: self._editor_text_changed(current))
@@ -1083,6 +1208,10 @@ class JsonWindow(QMainWindow):
         if editor is self.editor:
             self._update_fold_button()
 
+    def _editor_bookmarks_changed(self, editor: JsonEditor):
+        if editor is self.editor:
+            self._update_bookmark_status()
+
     def _update_fold_button(self):
         editor = self.editor
         if editor is None:
@@ -1105,6 +1234,46 @@ class JsonWindow(QMainWindow):
         else:
             editor.collapsed_blocks = set(editor.fold_regions)
         editor._apply_fold_visibility()
+
+    def toggle_bookmark(self):
+        editor = self.editor
+        if editor is None:
+            return
+        editor.set_bookmark()
+
+    def navigate_bookmark(self, direction: int):
+        editor = self.editor
+        if editor is None:
+            return
+        bookmarks = editor.bookmark_block_numbers()
+        if not bookmarks:
+            self._flash(self.tr("当前没有书签", "No bookmarks"))
+            return
+        current_line = editor.textCursor().blockNumber()
+        if direction > 0:
+            target = next((line for line in bookmarks if line > current_line), bookmarks[0])
+        else:
+            target = next((line for line in reversed(bookmarks) if line < current_line), bookmarks[-1])
+        editor.reveal_block(target)
+        block = editor.document().findBlockByNumber(target)
+        cursor = QTextCursor(editor.document())
+        cursor.setPosition(block.position())
+        editor.setTextCursor(cursor)
+        editor.ensureCursorVisible()
+        self._update_bookmark_status()
+
+    def _update_bookmark_status(self):
+        if not hasattr(self, "bookmark_label") or self.editor is None:
+            return
+        bookmarks = self.editor.bookmark_block_numbers()
+        current_line = self.editor.textCursor().blockNumber()
+        current_index = bookmarks.index(current_line) + 1 if current_line in bookmarks else 0
+        self.bookmark_label.setText(self.tr(
+            "书签 {index} / {total}",
+            "Bookmarks {index} / {total}",
+            index=current_index,
+            total=len(bookmarks),
+        ))
 
     def close_tab(self, index: int):
         if index < 0:
@@ -1476,6 +1645,7 @@ class JsonWindow(QMainWindow):
         cursor = self.editor.textCursor()
         self.current_value = value
         self.rendered_text = output
+        self.editor.clear_bookmarks()
         self.editor.setPlainText(output)
         cursor.setPosition(min(cursor.position(), len(output)))
         self.editor.setTextCursor(cursor)
@@ -1549,12 +1719,14 @@ class JsonWindow(QMainWindow):
         if editor is self.editor:
             self.stats_label.setText(editor.json_stats_text)
             self.update_path()
+            self._update_bookmark_status()
             if self.search_bar.isVisible():
                 self.perform_search()
 
     def _editor_cursor_changed(self, editor: QPlainTextEdit):
         if editor is self.editor:
             self.update_path()
+            self._update_bookmark_status()
 
     def _editor_selection_changed(self, editor: QPlainTextEdit):
         if (
@@ -1574,6 +1746,7 @@ class JsonWindow(QMainWindow):
             return
         self.stats_label.setText(editor.json_stats_text)
         self.update_path()
+        self._update_bookmark_status()
 
     def update_path(self):
         cursor = self.editor.textCursor()
@@ -1679,6 +1852,7 @@ class JsonWindow(QMainWindow):
 
         self.copy_full.setText(self.tr("复制 $", "Copy $"))
         self.copy_plain.setText(self.tr("复制无 $", "Copy without $"))
+        self._update_bookmark_status()
         self.hint.setText(self.default_hint)
         self._update_fold_button()
         self._update_tab_count_button()
