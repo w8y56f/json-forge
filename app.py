@@ -29,9 +29,10 @@ from json_tools import (
     JsonToolError, parse_json_like, path_at_position, render_json,
     searchable_spans, value_stats,
 )
+from version_info import DISPLAY_VERSION
 
 
-APP_VERSION = "v1.0.0"
+APP_VERSION = DISPLAY_VERSION
 APP_NAME = "JSON Forge"
 SETTINGS_ORGANIZATION = "LocalTools"
 SETTINGS_APPLICATION = APP_NAME

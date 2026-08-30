@@ -12,9 +12,16 @@ import tempfile
 from pathlib import Path
 
 
-APP_VERSION = "v1.0.0"
-ARCHIVE_NAME = "json-forge-windows-x86_64.zip"
-OUTPUT_NAME = "JSON Forge-Windows-x86_64.exe"
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from release_utils import backup_existing  # noqa: E402
+from version_info import DISPLAY_VERSION  # noqa: E402
+
+
+ARCHIVE_NAME = f"JSON-Forge-{DISPLAY_VERSION}-windows-x86_64.zip"
+OUTPUT_NAME = f"JSON-Forge-{DISPLAY_VERSION}-windows-x86_64.exe"
 
 
 def main() -> int:
@@ -22,7 +29,7 @@ def main() -> int:
     parser.add_argument("--archive", type=Path, help="portable Windows ZIP to embed")
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parents[1]
+    root = ROOT
     archive = (args.archive or root / "dist" / ARCHIVE_NAME).resolve()
     launcher_source = root / "packaging" / "windows_launcher" / "main.go"
     go = shutil.which("go")
@@ -32,10 +39,11 @@ def main() -> int:
         parser.error(f"portable Windows archive does not exist: {archive}")
 
     output = root / "dist" / OUTPUT_NAME
+    backup_existing(output)
     environment = os.environ.copy()
     environment.update({"GOOS": "windows", "GOARCH": "amd64", "CGO_ENABLED": "0", "GO111MODULE": "off"})
     try:
-        with tempfile.TemporaryDirectory(prefix="json-forge-windows-launcher-") as temporary_name:
+        with tempfile.TemporaryDirectory(prefix="JSON-Forge-windows-launcher-") as temporary_name:
             temporary = Path(temporary_name)
             shutil.copy2(launcher_source, temporary / "main.go")
             shutil.copy2(archive, temporary / "payload.zip")
@@ -44,7 +52,7 @@ def main() -> int:
                 "build",
                 "-trimpath",
                 "-ldflags",
-                f"-s -w -H=windowsgui -X main.payloadVersion={APP_VERSION}",
+                f"-s -w -H=windowsgui -X main.payloadVersion={DISPLAY_VERSION}",
                 "-o",
                 str(output),
                 "main.go",

@@ -22,7 +22,7 @@ var payload []byte
 
 var payloadVersion = "development"
 
-const payloadRoot = "json-forge-windows-x86_64"
+const payloadRoot = "JSON-Forge-windows-x86_64"
 
 func showError(message string) {
 	user32 := syscall.NewLazyDLL("user32.dll")

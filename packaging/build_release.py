@@ -31,7 +31,15 @@ import zipfile
 from pathlib import Path
 
 
-APP_NAME = "json-forge"
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from release_utils import backup_existing  # noqa: E402
+from version_info import DISPLAY_VERSION  # noqa: E402
+
+
+APP_NAME = "JSON-Forge"
 PYTHON_LINE = "3.12"
 PBA_API = "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
 
@@ -57,8 +65,10 @@ TARGETS = {
 }
 
 SOURCE_FILES = (
+    "VERSION",
     "app.py",
     "json_tools.py",
+    "version_info.py",
     "requirements.txt",
     "README.md",
     "start.sh",
@@ -69,6 +79,11 @@ SOURCE_FILES = (
 def _run(command: list[str], *, cwd: Path | None = None) -> None:
     print("+", " ".join(command))
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def archive_name(target: str) -> str:
+    suffix = ".zip" if target.startswith("windows") else ".tar.gz"
+    return f"{APP_NAME}-{DISPLAY_VERSION}-{target}{suffix}"
 
 
 def _fetch_json(url: str) -> dict:
@@ -216,7 +231,7 @@ def build(target: str, output_root: Path, runtime_url: str | None = None) -> Pat
     _install_dependencies(root, bundle, target, info)
     manifest = {
         "application": APP_NAME,
-        "version": "v1.0.0",
+        "version": DISPLAY_VERSION,
         "target": target,
         "python": PYTHON_LINE,
         "runtime_release": release.get("tag_name"),
@@ -225,10 +240,8 @@ def build(target: str, output_root: Path, runtime_url: str | None = None) -> Pat
     }
     (bundle / "runtime-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    archive_suffix = ".zip" if target.startswith("windows") else ".tar.gz"
-    archive_path = output_root / f"{bundle.name}{archive_suffix}"
-    if archive_path.exists():
-        archive_path.unlink()
+    archive_path = output_root / archive_name(target)
+    backup_existing(archive_path)
     if target.startswith("windows"):
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as output_archive:
             for path in bundle.rglob("*"):

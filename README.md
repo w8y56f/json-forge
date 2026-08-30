@@ -1,6 +1,6 @@
 # JSON Forge
 
-版本：v1.0.0
+版本号由项目根目录的 `VERSION` 文件统一管理。
 
 一个使用 Python + PySide6 编写的本地 JSON 桌面工具。项目目录名为
 `json-forge`。
@@ -52,7 +52,7 @@ python3 -m venv .venv
 ```bash
 .venv/bin/python -m pip install pyinstaller
 .venv/bin/python packaging/build_macos_app.py --clean
-open "dist/JSON Forge.app"
+open "dist/JSON-Forge-v$(tr -d '\n' < VERSION)-macos-$(uname -m).zip"
 ```
 
 如果 `.venv` 是由 `uv` 创建且没有 `pip`，第一条命令改为：
@@ -61,8 +61,10 @@ open "dist/JSON Forge.app"
 uv pip install --python .venv/bin/python pyinstaller
 ```
 
-生成文件位于 `dist/JSON Forge.app`。应用内置 Python 和 PySide6，目标 Mac 无需安装
-Python。未使用 Apple Developer ID 签名的本地构建采用 ad-hoc 签名；复制到其他 Mac
+最终文件名为 `dist/JSON-Forge-v<version>-macos-<architecture>.zip`，其中版本号读取自
+根目录 `VERSION`；解压后得到 `JSON Forge.app`。
+构建目录中的 `.app` 中间产物会在 ZIP 完整性验证后删除。应用内置 Python 和 PySide6，
+目标 Mac 无需安装 Python。未使用 Apple Developer ID 签名的本地构建采用 ad-hoc 签名；复制到其他 Mac
 后若被 Gatekeeper 阻止，可在 Finder 中右键应用并选择“打开”。打包版的设置与会话存放在
 `~/Library/Application Support/JSON Forge/`。
 
@@ -90,11 +92,16 @@ python packaging/build_release.py --target windows-x86_64
 .venv/bin/python packaging/build_windows_exe.py
 ```
 
-产物为 `dist/JSON Forge-Windows-x86_64.exe`。它首次运行时会把内置运行环境解压至
-`%LOCALAPPDATA%\JSON Forge\runtime-v1.0.0`，用户设置和会话保存在
+产物名为 `dist/JSON-Forge-v<version>-windows-x86_64.exe`。它首次运行时会把内置运行环境解压至
+`%LOCALAPPDATA%\JSON Forge\runtime-v<version>`，用户设置和会话保存在
 `%APPDATA%\JSON Forge`。该本地构建没有商业代码签名，Windows SmartScreen 可能显示提示。
 
-生成的目录和压缩包会放在 `dist/`（macOS 为 `.tar.gz`，Windows 为 `.zip`，可直接用资源管理器解压）。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
+生成的目录和压缩包会放在 `dist/`，文件名中的 `v<version>` 自动读取根目录 `VERSION`（macOS 为 `.tar.gz`，Windows 为 `.zip`，可直接用资源管理器解压）。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
+
+同版本重复打包时，已有正式产物不会直接删除，而会先重命名为带本地时间戳前缀的备份，
+例如 `bak_20260830_100556_JSON-Forge-v1.0.0-macos-arm64.zip`。时间戳精确到秒；
+如果同一秒内名称冲突，会生成 `bak_20260830_100556_2_原文件名`、`..._3_原文件名`。
+正常构建清理会保留这些备份文件。
 
 ## 项目目录说明
 
@@ -102,6 +109,9 @@ python packaging/build_release.py --target windows-x86_64
 
 ```text
 json-forge/
+├── VERSION                      # 唯一版本号来源，不带 v 前缀
+├── version_info.py              # 读取并校验 VERSION，供程序和打包脚本共用
+├── release_utils.py             # 发布产物的时间戳备份等共用逻辑
 ├── app.py                       # 主界面和应用逻辑
 ├── json_tools.py                # JSON 解析、格式化、压缩、路径和搜索工具
 ├── requirements.txt             # Python 依赖清单，目前为 PySide6
