@@ -66,6 +66,7 @@ class SettingsStorageTests(unittest.TestCase):
         self.assertEqual(defaults.get("single_instance"), "true")
         self.assertEqual(defaults.get("brace_guides"), "true")
         self.assertEqual(defaults.get("line_wrap"), "true")
+        self.assertEqual(defaults.get("editor_font_size"), "13")
 
     def test_portable_ini_settings_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -159,11 +160,13 @@ class PlatformHintTests(unittest.TestCase):
         hint = platform_shortcut_hint("darwin")
         self.assertIn("⌘↵ 格式化", hint)
         self.assertIn("⌘⇧M 紧凑", hint)
+        self.assertIn("⌘滚轮 / ⌘+−0 缩放", hint)
 
     def test_windows_uses_ctrl_labels(self):
         hint = platform_shortcut_hint("win32")
         self.assertIn("Ctrl+Enter 格式化", hint)
         self.assertIn("Ctrl+Shift+M 紧凑", hint)
+        self.assertIn("Ctrl+滚轮 / Ctrl++−0 缩放", hint)
 
     def test_linux_uses_ctrl_labels(self):
         hint = platform_shortcut_hint("linux")
@@ -266,6 +269,23 @@ class LanguageUiTests(unittest.TestCase):
             self.window.editor.lineWrapMode(),
             QPlainTextEdit.LineWrapMode.WidgetWidth,
         )
+
+    def test_editor_font_zoom_updates_all_tabs_and_persists(self):
+        self.assertEqual(self.window.editor_font_size, 13)
+        self.assertEqual(self.window.editor.font().pointSize(), 13)
+
+        self.window.add_tab()
+        first_editor = self.window.editor_stack.widget(0)
+        self.window.adjust_editor_font_size(2)
+        self.assertEqual(self.window.editor_font_size, 15)
+        self.assertEqual(self.window.settings.value("editor_font_size", type=int), 15)
+        self.assertEqual(first_editor.font().pointSize(), 15)
+        self.assertEqual(self.window.editor.font().pointSize(), 15)
+
+        self.window.adjust_editor_font_size(-100)
+        self.assertEqual(self.window.editor_font_size, 8)
+        self.window.adjust_editor_font_size(0)
+        self.assertEqual(self.window.editor_font_size, 13)
 
     def test_tab_context_menu_contains_localized_rename_action(self):
         self.assertEqual(self.window.tab_bar.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)

@@ -206,15 +206,17 @@ def platform_shortcut_hint(platform_name: str | None = None, language: str = "zh
     if platform_name == "darwin":
         format_shortcut = "⌘↵"
         compact_shortcut = "⌘⇧M"
+        zoom_shortcut = "⌘滚轮 / ⌘+−0"
     else:
         format_shortcut = "Ctrl+Enter"
         compact_shortcut = "Ctrl+Shift+M"
+        zoom_shortcut = "Ctrl+滚轮 / Ctrl++−0"
     return localized(
         language,
         f"{format_shortcut} 格式化   ·   {compact_shortcut} 紧凑"
-        "   ·   光标移动时自动显示 JSONPath",
+        f"   ·   {zoom_shortcut} 缩放   ·   光标移动时自动显示 JSONPath",
         f"{format_shortcut} Format   ·   {compact_shortcut} Minify"
-        "   ·   Move the cursor to show JSONPath",
+        f"   ·   {zoom_shortcut} Zoom   ·   Move the cursor to show JSONPath",
     )
 
 
@@ -309,6 +311,15 @@ def setting_as_bool(settings: QSettings, key: str, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def setting_as_int(settings: QSettings, key: str, default: int, minimum: int, maximum: int) -> int:
+    """Read a bounded integer setting, falling back safely for invalid values."""
+    try:
+        value = int(settings.value(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 class MoreSettingsDialog(QDialog):
@@ -540,6 +551,7 @@ class JsonEditor(QPlainTextEdit):
 
     foldStateChanged = Signal(bool)
     bookmarksChanged = Signal()
+    fontZoomRequested = Signal(int)
     fold_column_width = 20
     bookmark_column_width = 18
 
@@ -633,6 +645,16 @@ class JsonEditor(QPlainTextEdit):
         super().resizeEvent(event)
         contents = self.contentsRect()
         self.gutter.setGeometry(QRect(contents.left(), contents.top(), self.gutter_width(), contents.height()))
+
+    def wheelEvent(self, event):
+        zoom_modifiers = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        if event.modifiers() & zoom_modifiers:
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta:
+                self.fontZoomRequested.emit(1 if delta > 0 else -1)
+                event.accept()
+                return
+        super().wheelEvent(event)
 
     def _brace_guide_segments(self):
         """Return visible cross-line brace guides as (x1, y1, x2, y2, color)."""
@@ -1019,6 +1041,10 @@ class JsonEditor(QPlainTextEdit):
 
 
 class JsonWindow(QMainWindow):
+    minimum_editor_font_size = 8
+    maximum_editor_font_size = 32
+    default_editor_font_size = 13
+
     def __init__(self):
         super().__init__()
         self.next_tab_number = 1
@@ -1050,6 +1076,16 @@ class JsonWindow(QMainWindow):
         )
         if not self.settings.contains("line_wrap"):
             self.settings.setValue("line_wrap", self.line_wrap_enabled)
+            self.settings.sync()
+        self.editor_font_size = setting_as_int(
+            self.settings,
+            "editor_font_size",
+            default_setting("editor_font_size", self.default_editor_font_size),
+            self.minimum_editor_font_size,
+            self.maximum_editor_font_size,
+        )
+        if not self.settings.contains("editor_font_size"):
+            self.settings.setValue("editor_font_size", self.editor_font_size)
             self.settings.sync()
         self.default_hint = platform_shortcut_hint(language=self.language)
         self.setWindowTitle(APP_NAME)
@@ -1565,6 +1601,13 @@ class JsonWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.apply_transform(True, "double"))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.add_tab)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
+        zoom_modifier = "Meta" if sys.platform == "darwin" else "Ctrl"
+        for key, adjustment in (("+", 1), ("=", 1), ("-", -1), ("0", 0)):
+            QShortcut(
+                QKeySequence(f"{zoom_modifier}+{key}"),
+                self,
+                activated=lambda change=adjustment: self.adjust_editor_font_size(change),
+            )
         QShortcut(QKeySequence.StandardKey.Find, self, activated=self.open_search)
         QShortcut(QKeySequence("Escape"), self, activated=self.close_search)
         app = QApplication.instance()
@@ -1599,7 +1642,7 @@ class JsonWindow(QMainWindow):
         )
         font = QFont("JetBrains Mono")
         font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(13)
+        font.setPointSize(self.editor_font_size)
         editor.setFont(font)
         # One formatting level is a tab displayed at the same width as the
         # original two-space indentation. Tabs remain stable when Qt falls
@@ -1619,6 +1662,7 @@ class JsonWindow(QMainWindow):
         editor.cursorPositionChanged.connect(lambda current=editor: self._editor_cursor_changed(current))
         editor.selectionChanged.connect(lambda current=editor: self._editor_selection_changed(current))
         editor.textChanged.connect(lambda current=editor: self._editor_text_changed(current))
+        editor.fontZoomRequested.connect(self.adjust_editor_font_size)
         return editor
 
     def add_tab(self, checked: bool = False):
@@ -1684,6 +1728,28 @@ class JsonWindow(QMainWindow):
         )
         for index in range(self.editor_stack.count()):
             self.editor_stack.widget(index).setLineWrapMode(mode)
+
+    def adjust_editor_font_size(self, adjustment: int):
+        """Zoom all editor tabs and persist the selected point size."""
+        if adjustment == 0:
+            size = self.default_editor_font_size
+        else:
+            size = self.editor_font_size + adjustment
+        size = max(self.minimum_editor_font_size, min(self.maximum_editor_font_size, size))
+        if size == self.editor_font_size:
+            return
+        self.editor_font_size = size
+        self.settings.setValue("editor_font_size", size)
+        self.settings.sync()
+        for index in range(self.editor_stack.count()):
+            editor = self.editor_stack.widget(index)
+            font = editor.font()
+            font.setPointSize(size)
+            editor.setFont(font)
+            editor.setTabStopDistance(editor.fontMetrics().horizontalAdvance("  "))
+            editor._update_gutter_width()
+            editor.gutter.update()
+        self._flash(self.tr("编辑器字号：{size} pt", "Editor font size: {size} pt", size=size))
 
     def toggle_all_folds(self):
         editor = self.editor
