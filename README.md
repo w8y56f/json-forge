@@ -72,7 +72,7 @@ uv pip install --python .venv/bin/python pyinstaller
 
 ### 便携目录
 
-发布包会把独立 Python 运行时和 PySide6 一起放进目录，因此目标电脑不需要预先安装 Python。目录内的 `start.sh`（macOS）和 `start.bat`（Windows）会自动调用随包附带的运行时。
+发布包会把独立 Python 运行时和 PySide6 一起放进目录，因此目标电脑不需要预先安装 Python。目录内的 `start.sh`（macOS）和 `start.bat`（Windows）会自动调用随包附带的运行时；双击 Windows 的 `start.bat` 后，启动脚本的黑色窗口会自动关闭。
 
 在 macOS Apple Silicon 上制作发布包：
 

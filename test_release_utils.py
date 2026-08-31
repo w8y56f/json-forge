@@ -6,6 +6,13 @@ from release_utils import backup_existing
 
 
 class ReleaseUtilsTests(unittest.TestCase):
+    def test_windows_launcher_uses_pythonw_and_returns_after_starting(self):
+        launcher = (Path(__file__).resolve().parent / "start.bat").read_text(encoding="utf-8")
+
+        self.assertIn("runtime\\python\\pythonw.exe", launcher)
+        self.assertIn('start "" /b "%PYTHONW%"', launcher)
+        self.assertIn("exit /b 0", launcher)
+
     def test_backup_existing_prefixes_zip_with_timestamp(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "JSON-Forge-v1.0.0-macos-arm64.zip"
