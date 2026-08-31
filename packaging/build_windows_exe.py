@@ -32,11 +32,14 @@ def main() -> int:
     root = ROOT
     archive = (args.archive or root / "dist" / ARCHIVE_NAME).resolve()
     launcher_source = root / "packaging" / "windows_launcher" / "main.go"
+    launcher_icon_resource = root / "packaging" / "windows_launcher" / "icon_windows_amd64.syso"
     go = shutil.which("go")
     if not go:
         parser.error("Go is required to cross-compile the Windows launcher")
     if not archive.is_file():
         parser.error(f"portable Windows archive does not exist: {archive}")
+    if not launcher_icon_resource.is_file():
+        parser.error(f"Windows icon resource does not exist: {launcher_icon_resource}")
 
     output = root / "dist" / OUTPUT_NAME
     backup_existing(output)
@@ -46,6 +49,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="JSON-Forge-windows-launcher-") as temporary_name:
             temporary = Path(temporary_name)
             shutil.copy2(launcher_source, temporary / "main.go")
+            shutil.copy2(launcher_icon_resource, temporary / launcher_icon_resource.name)
             shutil.copy2(archive, temporary / "payload.zip")
             command = [
                 go,

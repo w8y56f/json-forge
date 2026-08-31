@@ -69,10 +69,14 @@ def main() -> int:
         BUNDLE_ID,
         "--target-architecture",
         architecture,
+        "--icon",
+        "assets/JSON-Forge.icns",
         "--add-data",
         "config/settings.default.ini:config",
         "--add-data",
         "VERSION:.",
+        "--add-data",
+        "assets/JSON-Forge.png:assets",
         "app.py",
     ]
     if args.clean:

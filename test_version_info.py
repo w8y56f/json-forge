@@ -45,6 +45,9 @@ class VersionInfoTests(unittest.TestCase):
         )
         self.assertEqual(windows["ARCHIVE_NAME"], f"JSON-Forge-v{VERSION}-windows-x86_64.zip")
         self.assertEqual(windows["OUTPUT_NAME"], f"JSON-Forge-v{VERSION}-windows-x86_64.exe")
+        self.assertIn("assets/JSON-Forge.png", portable["SOURCE_FILES"])
+        self.assertTrue((root / "assets" / "JSON-Forge.icns").is_file())
+        self.assertTrue((root / "packaging" / "windows_launcher" / "icon_windows_amd64.syso").is_file())
 
 
 if __name__ == "__main__":

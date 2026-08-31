@@ -50,6 +50,11 @@ def bundled_resource_path(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+def application_icon_path() -> Path:
+    """Return the shared PNG icon used by the running application window."""
+    return bundled_resource_path("assets", "JSON-Forge.png")
+
+
 def application_data_path(*parts: str) -> Path:
     """Return the per-user writable data directory used by the macOS app."""
     return Path.home() / "Library" / "Application Support" / APP_NAME / Path(*parts)
@@ -1089,6 +1094,7 @@ class JsonWindow(QMainWindow):
             self.settings.sync()
         self.default_hint = platform_shortcut_hint(language=self.language)
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon(str(application_icon_path())))
         self.resize(1080, 720)
         self.setMinimumSize(760, 480)
         self._build_ui()
@@ -2633,6 +2639,7 @@ class JsonWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(str(application_icon_path())))
     app.setStyle("Fusion")
     startup_settings = create_app_settings()
     instance_lock = None

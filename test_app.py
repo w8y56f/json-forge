@@ -17,6 +17,7 @@ from app import (
     JsonWindow,
     MoreSettingsDialog,
     acquire_instance_lock,
+    application_icon_path,
     create_app_settings,
     default_settings_file_path,
     default_settings_values,
@@ -55,6 +56,11 @@ class InstanceLockTests(unittest.TestCase):
 
 
 class SettingsStorageTests(unittest.TestCase):
+    def test_application_icon_resource_exists(self):
+        icon = application_icon_path()
+        self.assertTrue(icon.is_file())
+        self.assertEqual(icon.name, "JSON-Forge.png")
+
     def test_default_settings_file_contains_all_application_defaults(self):
         defaults = default_settings_values(force_reload=True)
         self.assertTrue(default_settings_file_path().is_file())

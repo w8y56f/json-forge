@@ -73,6 +73,7 @@ SOURCE_FILES = (
     "README.md",
     "start.sh",
     "start.bat",
+    "assets/JSON-Forge.png",
 )
 
 
@@ -222,7 +223,9 @@ def build(target: str, output_root: Path, runtime_url: str | None = None) -> Pat
         shutil.copytree(extracted_python, bundle / "runtime" / "python", symlinks=True)
 
     for relative in SOURCE_FILES:
-        shutil.copy2(root / relative, bundle / relative)
+        destination = bundle / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / relative, destination)
     (bundle / "config").mkdir()
     shutil.copy2(root / "config" / "settings.default.ini", bundle / "config" / "settings.default.ini")
     (bundle / "cache").mkdir()
