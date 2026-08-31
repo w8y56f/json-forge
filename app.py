@@ -1043,6 +1043,14 @@ class JsonWindow(QMainWindow):
         self.language = self.settings.value("language", default_setting("language", "zh_CN"))
         if self.language not in ("zh_CN", "en"):
             self.language = "zh_CN"
+        self.line_wrap_enabled = setting_as_bool(
+            self.settings,
+            "line_wrap",
+            default_setting("line_wrap", True),
+        )
+        if not self.settings.contains("line_wrap"):
+            self.settings.setValue("line_wrap", self.line_wrap_enabled)
+            self.settings.sync()
         self.default_hint = platform_shortcut_hint(language=self.language)
         self.setWindowTitle(APP_NAME)
         self.resize(1080, 720)
@@ -1370,6 +1378,9 @@ class JsonWindow(QMainWindow):
         self.bare_button = self._button("键名无引号")
         self.double_button = self._button('键名双引号')
         self.single_button = self._button("键名单引号")
+        self.wrap_button = self._button("换行")
+        self.wrap_button.setCheckable(True)
+        self.wrap_button.setChecked(self.line_wrap_enabled)
         self.fold_button = self._button("折叠")
         self.fold_button.setEnabled(False)
         self.paste_button = self._button("从剪贴板粘贴")
@@ -1378,6 +1389,7 @@ class JsonWindow(QMainWindow):
                        self.double_button, self.single_button):
             tools.addWidget(button)
         tools.addStretch()
+        tools.addWidget(self.wrap_button)
         tools.addWidget(self.fold_button)
         tools.addWidget(self.paste_button)
         tools.addWidget(self.clear_button)
@@ -1519,6 +1531,7 @@ class JsonWindow(QMainWindow):
         self.bare_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "bare"))
         self.double_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "double"))
         self.single_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "single"))
+        self.wrap_button.toggled.connect(self.set_line_wrap_enabled)
         self.fold_button.clicked.connect(self.toggle_all_folds)
         self.paste_button.clicked.connect(self.paste)
         self.clear_button.clicked.connect(lambda: self.editor.clear())
@@ -1579,7 +1592,11 @@ class JsonWindow(QMainWindow):
             '在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容',
             'Paste JSON here, for example:\nLog prefix... {"user": {"name": "Alice"}} ...suffix',
         ))
-        editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        editor.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+            if self.line_wrap_enabled
+            else QPlainTextEdit.LineWrapMode.NoWrap
+        )
         font = QFont("JetBrains Mono")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(13)
@@ -1654,6 +1671,19 @@ class JsonWindow(QMainWindow):
             self.tr("展开", "Expand") if collapsed else self.tr("折叠", "Collapse")
         )
         self.fold_button.setEnabled(bool(editor.fold_regions))
+
+    def set_line_wrap_enabled(self, enabled: bool):
+        """Apply and persist the global editor line-wrap preference."""
+        self.line_wrap_enabled = bool(enabled)
+        self.settings.setValue("line_wrap", self.line_wrap_enabled)
+        self.settings.sync()
+        mode = (
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+            if self.line_wrap_enabled
+            else QPlainTextEdit.LineWrapMode.NoWrap
+        )
+        for index in range(self.editor_stack.count()):
+            self.editor_stack.widget(index).setLineWrapMode(mode)
 
     def toggle_all_folds(self):
         editor = self.editor
@@ -1821,6 +1851,13 @@ class JsonWindow(QMainWindow):
             )
             for index in range(self.editor_stack.count()):
                 self.editor_stack.widget(index).set_brace_guides_visible(brace_guides_visible)
+            line_wrap_enabled = setting_as_bool(
+                self.settings,
+                "line_wrap",
+                default_setting("line_wrap", True),
+            )
+            self.wrap_button.setChecked(line_wrap_enabled)
+            self.set_line_wrap_enabled(line_wrap_enabled)
             theme = self.settings.value("theme", default_setting("theme", "light"))
             if theme not in ("light", "dark"):
                 theme = "light"
@@ -2304,6 +2341,8 @@ class JsonWindow(QMainWindow):
         self.bare_button.setText(self.tr("键名无引号", "Unquoted Keys"))
         self.double_button.setText(self.tr("键名双引号", "Double-Quoted Keys"))
         self.single_button.setText(self.tr("键名单引号", "Single-Quoted Keys"))
+        self.wrap_button.setText(self.tr("换行", "Wrap"))
+        self.wrap_button.setToolTip(self.tr("切换过长行是否自动换行", "Toggle wrapping for long lines"))
         self.paste_button.setText(self.tr("从剪贴板粘贴", "Paste from Clipboard"))
         self.clear_button.setText(self.tr("清空", "Clear"))
 
@@ -2383,6 +2422,7 @@ class JsonWindow(QMainWindow):
                 }
                 QPushButton:hover, QToolButton:hover { background: #E2E8F0; border-color: #94A3B8; }
                 QPushButton:pressed, QToolButton:pressed { background: #CCFBF1; }
+                QPushButton:checked { background: #CCFBF1; border-color: #0D9488; }
                 QPushButton[primary="true"] { background: #0D9488; color: white; border-color: #0F766E; }
                 QPushButton[primary="true"]:hover { background: #0F766E; }
                 QPlainTextEdit#editor {
@@ -2434,6 +2474,7 @@ class JsonWindow(QMainWindow):
             }
             QPushButton:hover, QToolButton:hover { background: #21314B; border-color: #3D5272; }
             QPushButton:pressed, QToolButton:pressed { background: #0F766E; }
+            QPushButton:checked { background: #0F766E; border-color: #2DD4BF; }
             QPushButton[primary="true"] { background: #0D9488; color: white; border-color: #14B8A6; }
             QPushButton[primary="true"]:hover { background: #0F766E; }
             QPlainTextEdit#editor {

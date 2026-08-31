@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
 from app import (
     JsonEditor,
@@ -65,6 +65,7 @@ class SettingsStorageTests(unittest.TestCase):
         self.assertEqual(defaults.get("confirm_exit"), "true")
         self.assertEqual(defaults.get("single_instance"), "true")
         self.assertEqual(defaults.get("brace_guides"), "true")
+        self.assertEqual(defaults.get("line_wrap"), "true")
 
     def test_portable_ini_settings_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +208,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertTrue(self.window.editor.brace_guides_visible)
         self.window.apply_language("en")
         self.assertEqual(self.window.compact_button.text(), "Minify JSON")
+        self.assertEqual(self.window.wrap_button.text(), "Wrap")
         self.assertEqual(self.window.tab_bar.rename_hint, "Double-click the tab title to rename")
         self.assertEqual(self.window.path_label.text(), "Path  $")
         self.assertIn("Waiting for input", self.window.stats_label.text())
@@ -228,7 +230,42 @@ class LanguageUiTests(unittest.TestCase):
 
         self.window.apply_language("zh_CN")
         self.assertEqual(self.window.compact_button.text(), "压缩JSON")
+        self.assertEqual(self.window.wrap_button.text(), "换行")
         self.assertEqual(self.window.tab_bar.rename_hint, "双击标签标题可重命名")
+
+    def test_line_wrap_button_precedes_fold_and_persists_for_all_tabs(self):
+        toolbar_layout = self.window.wrap_button.parentWidget().layout()
+        self.assertEqual(
+            toolbar_layout.indexOf(self.window.wrap_button) + 1,
+            toolbar_layout.indexOf(self.window.fold_button),
+        )
+        self.assertTrue(self.window.wrap_button.isChecked())
+        self.assertTrue(self.window.settings.contains("line_wrap"))
+        self.assertTrue(self.window.settings.value("line_wrap", False, type=bool))
+        self.assertEqual(
+            self.window.editor.lineWrapMode(),
+            QPlainTextEdit.LineWrapMode.WidgetWidth,
+        )
+
+        self.window.wrap_button.click()
+        self.assertFalse(self.window.settings.value("line_wrap", True, type=bool))
+        self.assertEqual(
+            self.window.editor.lineWrapMode(),
+            QPlainTextEdit.LineWrapMode.NoWrap,
+        )
+        self.window.add_tab()
+        self.assertEqual(
+            self.window.editor.lineWrapMode(),
+            QPlainTextEdit.LineWrapMode.NoWrap,
+        )
+        first_editor = self.window.editor_stack.widget(0)
+        self.window.wrap_button.click()
+        self.assertTrue(self.window.settings.value("line_wrap", False, type=bool))
+        self.assertEqual(first_editor.lineWrapMode(), QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.assertEqual(
+            self.window.editor.lineWrapMode(),
+            QPlainTextEdit.LineWrapMode.WidgetWidth,
+        )
 
     def test_tab_context_menu_contains_localized_rename_action(self):
         self.assertEqual(self.window.tab_bar.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
