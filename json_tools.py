@@ -3,13 +3,65 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
 
 KeyStyle = Literal["double", "single", "bare"]
-_IDENTIFIER = re.compile(r"^[A-Za-z_$][\w$]*$", re.UNICODE)
+StringQuote = Literal["double", "single"]
+
+
+def _is_identifier_start(char: str) -> bool:
+    """Return whether *char* is a JSON5 / ECMAScript identifier start."""
+    return char in "$_" or char.isidentifier()
+
+
+def _is_identifier_part(char: str) -> bool:
+    """Return whether *char* is a JSON5 / ECMAScript identifier part."""
+    # Python's ``isidentifier`` also handles Unicode combining marks when
+    # they follow a valid start. ECMAScript additionally permits ZWNJ/ZWJ.
+    return char in "$_\u200c\u200d" or ("a" + char).isidentifier()
+
+
+def _read_json5_identifier(text: str, pos: int) -> tuple[str, int] | None:
+    """Read an unquoted JSON5 key, decoding its ``\\uXXXX`` escapes.
+
+    JSON5 property names use ECMAScript IdentifierName syntax, rather than
+    ASCII-only identifiers. Keeping this scanner separate from tokenization
+    lets formatting retain the original spelling while parsing gets the
+    actual dictionary key.
+    """
+    value: list[str] = []
+    is_start = True
+    while pos < len(text):
+        if text[pos] == "\\":
+            if pos + 6 > len(text) or text[pos + 1] != "u":
+                return None if is_start else ("".join(value), pos)
+            digits = text[pos + 2:pos + 6]
+            if not re.fullmatch(r"[0-9A-Fa-f]{4}", digits):
+                return None if is_start else ("".join(value), pos)
+            char = chr(int(digits, 16))
+            next_pos = pos + 6
+        else:
+            char = text[pos]
+            next_pos = pos + 1
+
+        valid = _is_identifier_start(char) if is_start else _is_identifier_part(char)
+        if not valid:
+            break
+        value.append(char)
+        pos = next_pos
+        is_start = False
+    return ("".join(value), pos) if value else None
+
+
+def _is_json5_identifier(value: str) -> bool:
+    """Return whether a decoded key can be emitted without quotes in JSON5."""
+    if not value or not _is_identifier_start(value[0]):
+        return False
+    return all(_is_identifier_part(char) for char in value[1:])
 
 
 class JsonToolError(ValueError):
@@ -34,7 +86,9 @@ def _outer_starts(text: str) -> list[int]:
     stack: list[str] = []
     quote: str | None = None
     escaped = False
-    for index, char in enumerate(text):
+    index = 0
+    while index < len(text):
+        char = text[index]
         if quote:
             if escaped:
                 escaped = False
@@ -42,9 +96,18 @@ def _outer_starts(text: str) -> list[int]:
                 escaped = True
             elif char == quote:
                 quote = None
+            index += 1
             continue
         if char in "\"'":
             quote = char
+        elif char == "/" and index + 1 < len(text) and text[index + 1] == "/":
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline + 1
+            continue
+        elif char == "/" and index + 1 < len(text) and text[index + 1] == "*":
+            closing = text.find("*/", index + 2)
+            index = len(text) if closing < 0 else closing + 2
+            continue
         elif char in "[{":
             if not stack:
                 starts.append(index)
@@ -53,6 +116,7 @@ def _outer_starts(text: str) -> list[int]:
             expected = "[" if char == "]" else "{"
             if stack[-1] == expected:
                 stack.pop()
+        index += 1
     return starts
 
 
@@ -83,19 +147,32 @@ def extract_json(text: str) -> tuple[Any, int, int]:
 
 
 class _JsonLikeValueParser:
-    """Recursive parser for JSON with single-quoted strings and bare keys."""
+    """Recursive parser for practical JSON5-style input."""
 
-    _NUMBER = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
-    _BARE_KEY = re.compile(r"[A-Za-z_$][\w$]*", re.UNICODE)
-
+    _NUMBER = re.compile(
+        r"[+-]?(?:0[xX][0-9A-Fa-f]+|(?:(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?))"
+    )
     def __init__(self, text: str, start: int):
         self.text = text
         self.pos = start
         self.key_styles: set[KeyStyle] = set()
 
     def skip_ws(self) -> None:
-        while self.pos < len(self.text) and self.text[self.pos].isspace():
-            self.pos += 1
+        while self.pos < len(self.text):
+            if self.text[self.pos].isspace():
+                self.pos += 1
+                continue
+            if self.text.startswith("//", self.pos):
+                newline = self.text.find("\n", self.pos + 2)
+                self.pos = len(self.text) if newline < 0 else newline + 1
+                continue
+            if self.text.startswith("/*", self.pos):
+                closing = self.text.find("*/", self.pos + 2)
+                if closing < 0:
+                    raise JsonToolError("块注释缺少结束符 */")
+                self.pos = closing + 2
+                continue
+            return
 
     def expect(self, char: str) -> None:
         self.skip_ws()
@@ -108,7 +185,10 @@ class _JsonLikeValueParser:
         style: KeyStyle = "double" if quote == '"' else "single"
         self.pos += 1
         chars: list[str] = []
-        escapes = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "/": "/", "\\": "\\", '"': '"', "'": "'"}
+        escapes = {
+            "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+            "0": "\0", "/": "/", "\\": "\\", '"': '"', "'": "'",
+        }
         while self.pos < len(self.text):
             char = self.text[self.pos]
             self.pos += 1
@@ -121,12 +201,30 @@ class _JsonLikeValueParser:
                 break
             escaped = self.text[self.pos]
             self.pos += 1
+            if escaped in "\r\n":
+                if escaped == "\r" and self.pos < len(self.text) and self.text[self.pos] == "\n":
+                    self.pos += 1
+                continue
             if escaped == "u":
+                if self.pos < len(self.text) and self.text[self.pos] == "{":
+                    closing = self.text.find("}", self.pos + 1)
+                    digits = self.text[self.pos + 1:closing] if closing >= 0 else ""
+                    if not digits or not re.fullmatch(r"[0-9A-Fa-f]{1,6}", digits):
+                        raise JsonToolError("字符串包含无效的 Unicode 转义")
+                    chars.append(chr(int(digits, 16)))
+                    self.pos = closing + 1
+                    continue
                 digits = self.text[self.pos:self.pos + 4]
                 if len(digits) != 4 or not re.fullmatch(r"[0-9A-Fa-f]{4}", digits):
                     raise JsonToolError("字符串包含无效的 Unicode 转义")
                 chars.append(chr(int(digits, 16)))
                 self.pos += 4
+            elif escaped == "x":
+                digits = self.text[self.pos:self.pos + 2]
+                if len(digits) != 2 or not re.fullmatch(r"[0-9A-Fa-f]{2}", digits):
+                    raise JsonToolError("字符串包含无效的十六进制转义")
+                chars.append(chr(int(digits, 16)))
+                self.pos += 2
             elif escaped in escapes:
                 chars.append(escapes[escaped])
             else:
@@ -149,11 +247,22 @@ class _JsonLikeValueParser:
             if self.text.startswith(token, self.pos):
                 self.pos += len(token)
                 return value
+        for token, value in (("Infinity", float("inf")), ("NaN", float("nan"))):
+            for sign, multiplier in (("", 1), ("+", 1), ("-", -1)):
+                shown = sign + token
+                if self.text.startswith(shown, self.pos):
+                    self.pos += len(shown)
+                    return value * multiplier
         match = self._NUMBER.match(self.text, self.pos)
         if match:
             token = match.group()
             self.pos = match.end()
-            return json.loads(token)
+            try:
+                return int(token, 0) if "x" in token.lower() else float(token) if any(
+                    marker in token.lower() for marker in (".", "e")
+                ) else int(token)
+            except ValueError as exc:
+                raise JsonToolError(f"无效数字：{token}") from exc
         raise JsonToolError(f"第 {self.pos + 1} 个字符附近不是有效的 JSON 值")
 
     def parse_object(self) -> dict[str, Any]:
@@ -170,11 +279,10 @@ class _JsonLikeValueParser:
             if self.text[self.pos] in "\"'":
                 key, style = self.parse_string()
             else:
-                match = self._BARE_KEY.match(self.text, self.pos)
-                if not match:
+                identifier = _read_json5_identifier(self.text, self.pos)
+                if identifier is None:
                     raise JsonToolError(f"第 {self.pos + 1} 个字符附近不是有效的属性名")
-                key = match.group()
-                self.pos = match.end()
+                key, self.pos = identifier
                 style = "bare"
             self.key_styles.add(style)
             self.expect(":")
@@ -182,6 +290,10 @@ class _JsonLikeValueParser:
             self.skip_ws()
             if self.pos < len(self.text) and self.text[self.pos] == ",":
                 self.pos += 1
+                self.skip_ws()
+                if self.pos < len(self.text) and self.text[self.pos] == "}":
+                    self.pos += 1
+                    return result
                 continue
             if self.pos < len(self.text) and self.text[self.pos] == "}":
                 self.pos += 1
@@ -200,6 +312,10 @@ class _JsonLikeValueParser:
             self.skip_ws()
             if self.pos < len(self.text) and self.text[self.pos] == ",":
                 self.pos += 1
+                self.skip_ws()
+                if self.pos < len(self.text) and self.text[self.pos] == "]":
+                    self.pos += 1
+                    return result
                 continue
             if self.pos < len(self.text) and self.text[self.pos] == "]":
                 self.pos += 1
@@ -224,6 +340,246 @@ def parse_json_like(text: str) -> ParsedJsonLike:
     raise JsonToolError("没有找到完整、有效的 JSON 对象或数组")
 
 
+@dataclass(frozen=True)
+class _Json5Token:
+    kind: Literal["punctuation", "string", "atom", "line_comment", "block_comment"]
+    raw: str
+    leading: str
+
+
+def _json5_tokens(source: str) -> list[_Json5Token]:
+    """Tokenize JSON5 source while retaining every non-whitespace token verbatim."""
+    tokens: list[_Json5Token] = []
+    pos = 0
+    leading_start = 0
+    punctuation = "{}[],:"
+    while pos < len(source):
+        if source[pos].isspace():
+            pos += 1
+            continue
+        leading = source[leading_start:pos]
+        if source.startswith("//", pos):
+            end = source.find("\n", pos + 2)
+            end = len(source) if end < 0 else end
+            tokens.append(_Json5Token("line_comment", source[pos:end], leading))
+            pos = end
+        elif source.startswith("/*", pos):
+            end = source.find("*/", pos + 2)
+            if end < 0:
+                raise JsonToolError("块注释缺少结束符 */")
+            end += 2
+            tokens.append(_Json5Token("block_comment", source[pos:end], leading))
+            pos = end
+        elif source[pos] in "\"'":
+            quote = source[pos]
+            start = pos
+            pos += 1
+            escaped = False
+            while pos < len(source):
+                char = source[pos]
+                pos += 1
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    break
+            if pos > len(source) or source[pos - 1] != quote:
+                raise JsonToolError("字符串缺少结束引号")
+            tokens.append(_Json5Token("string", source[start:pos], leading))
+        elif source[pos] in punctuation:
+            tokens.append(_Json5Token("punctuation", source[pos], leading))
+            pos += 1
+        else:
+            start = pos
+            while pos < len(source) and not source[pos].isspace() and source[pos] not in punctuation + "\"'":
+                if source.startswith("//", pos) or source.startswith("/*", pos):
+                    break
+                pos += 1
+            if start == pos:
+                raise JsonToolError(f"第 {pos + 1} 个字符附近不是有效的 JSON5 标记")
+            tokens.append(_Json5Token("atom", source[start:pos], leading))
+        leading_start = pos
+    return tokens
+
+
+def _format_json5_tokens(tokens: list[_Json5Token]) -> str:
+    """Pretty-print tokens without rewriting comments, literals, or key styles."""
+    output: list[str] = []
+    indent = 0
+    line_start = True
+
+    def write(text: str) -> None:
+        nonlocal line_start
+        if line_start:
+            output.append("\t" * indent)
+            line_start = False
+        output.append(text)
+
+    def newline() -> None:
+        nonlocal line_start
+        while output and output[-1] == " ":
+            output.pop()
+        if not line_start:
+            output.append("\n")
+        line_start = True
+
+    for index, token in enumerate(tokens):
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token.kind == "punctuation":
+            if token.raw in "{[":
+                write(token.raw)
+                indent += 1
+                if next_token is not None and not (
+                    next_token.kind == "punctuation" and next_token.raw in "}]"):
+                    newline()
+            elif token.raw in "}]":
+                indent = max(0, indent - 1)
+                if not line_start:
+                    newline()
+                write(token.raw)
+            elif token.raw == ",":
+                write(",")
+                if not (
+                    next_token is not None
+                    and next_token.kind == "block_comment"
+                    and "\n" not in next_token.leading
+                ):
+                    newline()
+            else:  # colon
+                write(": ")
+            continue
+
+        if token.kind == "line_comment":
+            if not line_start:
+                write(" ")
+            write(token.raw)
+            newline()
+            continue
+
+        if token.kind == "block_comment":
+            inline = not line_start and "\n" not in token.leading
+            if inline:
+                write(" ")
+                write(token.raw)
+                if not (
+                    next_token is not None
+                    and next_token.kind == "punctuation"
+                    and next_token.raw == ","
+                ):
+                    newline()
+            else:
+                write(token.raw)
+                newline()
+            continue
+
+        write(token.raw)
+
+    return "".join(output).rstrip()
+
+
+def format_json_like(text: str, parsed: ParsedJsonLike | None = None) -> tuple[str, ParsedJsonLike]:
+    """Format JSON5-style source while preserving comments and literal spelling."""
+    parsed = parsed or parse_json_like(text)
+    return _format_json5_tokens(_json5_tokens(text[parsed.start:parsed.end])), parsed
+
+
+def json5_minify_risks(text: str, parsed: ParsedJsonLike | None = None) -> frozenset[str]:
+    """Return JSON5 source features that canonical minification would lose.
+
+    Whitespace alone is intentionally not a risk: compacting ordinary,
+    pretty-printed JSON is expected. The source span is limited to the parsed
+    value so log prefixes and suffixes cannot trigger the confirmation.
+    """
+    parsed = parsed or parse_json_like(text)
+    tokens = _json5_tokens(text[parsed.start:parsed.end])
+    risks: set[str] = set()
+    strict_number = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+    def next_code_token(index: int) -> _Json5Token | None:
+        return next(
+            (token for token in tokens[index + 1:] if token.kind not in ("line_comment", "block_comment")),
+            None,
+        )
+
+    for index, token in enumerate(tokens):
+        following = next_code_token(index)
+        if token.kind in ("line_comment", "block_comment"):
+            risks.add("comments")
+        elif token.kind == "string":
+            if token.raw.startswith("'"):
+                risks.add("single_quotes")
+            if re.search(r"\\(?:\r\n|\r|\n|[vx]|0(?!\d)|u\{)", token.raw):
+                risks.add("json5_string_escapes")
+        elif token.kind == "atom":
+            if following is not None and following.kind == "punctuation" and following.raw == ":":
+                risks.add("bare_keys")
+            elif token.raw not in ("true", "false", "null") and not strict_number.fullmatch(token.raw):
+                risks.add("json5_literals")
+        elif (
+            token.kind == "punctuation"
+            and token.raw == ","
+            and following is not None
+            and following.kind == "punctuation"
+            and following.raw in "]}"
+        ):
+            risks.add("trailing_commas")
+    return frozenset(risks)
+
+
+def rewrite_json_like_quotes(
+    text: str,
+    *,
+    key_style: KeyStyle | None = None,
+    value_quote: StringQuote | None = None,
+    parsed: ParsedJsonLike | None = None,
+) -> tuple[str, ParsedJsonLike, int]:
+    """Rewrite only JSON5 quote tokens while preserving all other source text.
+
+    The returned count is the number of rewritten value strings for which the
+    target quote needed an added escape character.
+    """
+    parsed = parsed or parse_json_like(text)
+    tokens = _json5_tokens(text[parsed.start:parsed.end])
+    converted: list[_Json5Token] = []
+    escaped_value_count = 0
+    for index, token in enumerate(tokens):
+        is_key = (
+            token.kind in ("string", "atom")
+            and next(
+                (
+                    candidate.raw == ":"
+                    for candidate in tokens[index + 1:]
+                    if candidate.kind not in ("line_comment", "block_comment")
+                ),
+                False,
+            )
+        )
+        if is_key and key_style is not None:
+            key = (
+                _JsonLikeValueParser(token.raw, 0).parse_string()[0]
+                if token.kind == "string" else token.raw
+            )
+            if key_style == "bare" and _is_json5_identifier(key):
+                raw, kind = key, "atom"
+            elif key_style == "bare":
+                raw, kind = token.raw, token.kind
+            else:
+                target_quote = "'" if key_style == "single" else '"'
+                raw = token.raw if token.kind == "string" and token.raw.startswith(target_quote) else _json_string(key, target_quote)
+                kind = "string"
+            token = _Json5Token(kind, raw, token.leading)
+        elif token.kind == "string" and not is_key and value_quote is not None:
+            target_quote = "'" if value_quote == "single" else '"'
+            if not token.raw.startswith(target_quote):
+                value, _ = _JsonLikeValueParser(token.raw, 0).parse_string()
+                escaped_value_count += int(target_quote in value)
+                token = _Json5Token("string", _json_string(value, target_quote), token.leading)
+        converted.append(token)
+    source = "".join(token.leading + token.raw for token in converted)
+    return text[:parsed.start] + source + text[parsed.end:], parsed, escaped_value_count
+
+
 def _json_string(value: str, quote: str = '"') -> str:
     encoded = json.dumps(value, ensure_ascii=False)
     if quote == '"':
@@ -234,19 +590,32 @@ def _json_string(value: str, quote: str = '"') -> str:
     return f"'{body}'"
 
 
-def _render(value: Any, *, compact: bool, key_style: KeyStyle, level: int = 0) -> str:
+def _render(
+    value: Any,
+    *,
+    compact: bool,
+    key_style: KeyStyle,
+    string_quote: StringQuote,
+    level: int = 0,
+) -> str:
     if isinstance(value, dict):
         if not value:
             return "{}"
         pieces: list[str] = []
         for key, item in value.items():
             key = str(key)
-            if key_style == "bare" and _IDENTIFIER.match(key):
+            if key_style == "bare" and _is_json5_identifier(key):
                 shown_key = key
             else:
                 shown_key = _json_string(key, "'" if key_style == "single" else '"')
             sep = ":" if compact else ": "
-            pieces.append(shown_key + sep + _render(item, compact=compact, key_style=key_style, level=level + 1))
+            pieces.append(shown_key + sep + _render(
+                item,
+                compact=compact,
+                key_style=key_style,
+                string_quote=string_quote,
+                level=level + 1,
+            ))
         if compact:
             return "{" + ",".join(pieces) + "}"
         indent = "\t" * (level + 1)
@@ -254,17 +623,36 @@ def _render(value: Any, *, compact: bool, key_style: KeyStyle, level: int = 0) -
     if isinstance(value, list):
         if not value:
             return "[]"
-        pieces = [_render(item, compact=compact, key_style=key_style, level=level + 1) for item in value]
+        pieces = [_render(
+            item,
+            compact=compact,
+            key_style=key_style,
+            string_quote=string_quote,
+            level=level + 1,
+        ) for item in value]
         if compact:
             return "[" + ",".join(pieces) + "]"
         indent = "\t" * (level + 1)
         return "[\n" + indent + (",\n" + indent).join(pieces) + "\n" + "\t" * level + "]"
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, str):
+        return _json_string(value, "'" if string_quote == "single" else '"')
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
-def render_json(value: Any, *, compact: bool = False, key_style: KeyStyle = "double") -> str:
+def render_json(
+    value: Any,
+    *,
+    compact: bool = False,
+    key_style: KeyStyle = "double",
+    string_quote: StringQuote = "double",
+) -> str:
     """Render an already parsed value without parsing its current presentation again."""
-    return _render(value, compact=compact, key_style=key_style)
+    return _render(value, compact=compact, key_style=key_style, string_quote=string_quote)
 
 
 def transform(text: str, *, compact: bool = False, key_style: KeyStyle = "double") -> tuple[str, int, int, Any]:
@@ -389,7 +777,7 @@ def format_path(parts: tuple[str | int, ...], include_root: bool = True) -> str:
     for part in parts:
         if isinstance(part, int):
             path += f"[{part}]"
-        elif _IDENTIFIER.match(part):
+        elif _is_json5_identifier(part):
             path += ("." if path else "") + part
         else:
             escaped = part.replace("\\", "\\\\").replace("'", "\\'")
@@ -444,7 +832,6 @@ def searchable_spans(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, 
     pos = 0
     length = len(text)
     number = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
-    identifier = re.compile(r"[A-Za-z_$][\w$]*", re.UNICODE)
 
     while pos < length:
         char = text[pos]
@@ -468,9 +855,10 @@ def searchable_spans(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, 
                 lookahead += 1
             (keys if lookahead < length and text[lookahead] == ":" else values).append((start, end))
             continue
-        word = identifier.match(text, pos)
-        if word:
-            start, end = word.span()
+        identifier = _read_json5_identifier(text, pos)
+        if identifier:
+            _, end = identifier
+            start = pos
             lookahead = end
             while lookahead < length and text[lookahead].isspace():
                 lookahead += 1

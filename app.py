@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from json_tools import (
-    JsonToolError, parse_json_like, path_at_position, render_json,
+    JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_quotes,
     searchable_spans, value_stats,
 )
 from version_info import DISPLAY_VERSION
@@ -1417,9 +1417,11 @@ class JsonWindow(QMainWindow):
         tools.setSpacing(7)
         self.format_button = self._button("格式化", True)
         self.compact_button = self._button("压缩JSON")
-        self.bare_button = self._button("键名无引号")
-        self.double_button = self._button('键名双引号')
-        self.single_button = self._button("键名单引号")
+        self.bare_button = self._button("key无引号")
+        self.double_button = self._button('key双引号')
+        self.single_button = self._button("key单引号")
+        self.key_value_double_button = self._button("value双引号")
+        self.key_value_single_button = self._button("value单引号")
         self.wrap_button = self._button("换行")
         self.wrap_button.setCheckable(True)
         self.wrap_button.setChecked(self.line_wrap_enabled)
@@ -1428,7 +1430,8 @@ class JsonWindow(QMainWindow):
         self.paste_button = self._button("从剪贴板粘贴")
         self.clear_button = self._button("清空")
         for button in (self.format_button, self.compact_button, self.bare_button,
-                       self.double_button, self.single_button):
+                       self.double_button, self.single_button, self.key_value_double_button,
+                       self.key_value_single_button):
             tools.addWidget(button)
         tools.addStretch()
         tools.addWidget(self.wrap_button)
@@ -1568,11 +1571,25 @@ class JsonWindow(QMainWindow):
         self.search_bar.raise_()
 
     def _connect(self):
-        self.format_button.clicked.connect(lambda: self.apply_transform(False, "double"))
+        self.format_button.clicked.connect(
+            lambda: self.apply_transform(False, "double", preserve_source=True)
+        )
         self.compact_button.clicked.connect(lambda: self.apply_transform(True, "double"))
-        self.bare_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "bare"))
-        self.double_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "double"))
-        self.single_button.clicked.connect(lambda: self.apply_transform(self.compact_mode, "single"))
+        self.bare_button.clicked.connect(lambda: self.apply_transform(
+            self.compact_mode, "bare", preserve_presentation=True
+        ))
+        self.double_button.clicked.connect(lambda: self.apply_transform(
+            self.compact_mode, "double", preserve_presentation=True
+        ))
+        self.single_button.clicked.connect(lambda: self.apply_transform(
+            self.compact_mode, "single", preserve_presentation=True
+        ))
+        self.key_value_double_button.clicked.connect(lambda: self.apply_transform(
+            self.compact_mode, "double", preserve_presentation=True, value_quote="double"
+        ))
+        self.key_value_single_button.clicked.connect(lambda: self.apply_transform(
+            self.compact_mode, "double", preserve_presentation=True, value_quote="single"
+        ))
         self.wrap_button.toggled.connect(self.set_line_wrap_enabled)
         self.fold_button.clicked.connect(self.toggle_all_folds)
         self.paste_button.clicked.connect(self.paste)
@@ -1603,7 +1620,11 @@ class JsonWindow(QMainWindow):
         self.search_up_button.clicked.connect(lambda: self.navigate_search(-1))
         self.search_down_button.clicked.connect(lambda: self.navigate_search(1))
         self.search_close_button.clicked.connect(self.close_search)
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=lambda: self.apply_transform(False, "double"))
+        QShortcut(
+            QKeySequence("Ctrl+Return"),
+            self,
+            activated=lambda: self.apply_transform(False, "double", preserve_source=True),
+        )
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.apply_transform(True, "double"))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.add_tab)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
@@ -2200,14 +2221,48 @@ class JsonWindow(QMainWindow):
             return f"Missing a comma or closing brace near character {match.group(1)}"
         return "Invalid JSON: " + message
 
-    def apply_transform(self, compact: bool, style: str):
+    def apply_transform(
+        self,
+        compact: bool,
+        style: str,
+        preserve_source: bool = False,
+        string_quote: str = "double",
+        value_quote: str | None = None,
+        preserve_presentation: bool = False,
+    ):
         text = self.editor.toPlainText()
         if not text.strip():
             self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
             return
-        if self.current_value is not None and text == self.rendered_text:
+        if preserve_presentation:
+            try:
+                parsed = parse_json_like(text)
+                output, parsed, escaped_value_count = rewrite_json_like_quotes(
+                    text,
+                    key_style=None if value_quote is not None else style,
+                    value_quote=value_quote,
+                    parsed=parsed,
+                )
+            except (JsonToolError, ValueError) as exc:
+                self._flash(self._localized_json_error(str(exc)), error=True)
+                return
+            if escaped_value_count and not self._confirm_value_quote_change(escaped_value_count, value_quote):
+                self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
+                return
+            value = parsed.value
+            prefix, suffix = parsed.start, len(text) - parsed.end
+        elif preserve_source:
+            try:
+                parsed = parse_json_like(text)
+                output, parsed = format_json_like(text, parsed)
+            except (JsonToolError, ValueError) as exc:
+                self._flash(self._localized_json_error(str(exc)), error=True)
+                return
+            value = parsed.value
+            prefix, suffix = parsed.start, len(text) - parsed.end
+        elif self.current_value is not None and text == self.rendered_text:
             value = self.current_value
-            output = render_json(value, compact=compact, key_style=style)
+            output = render_json(value, compact=compact, key_style=style, string_quote=string_quote)
             prefix = suffix = 0
         else:
             try:
@@ -2215,12 +2270,15 @@ class JsonWindow(QMainWindow):
             except (JsonToolError, ValueError) as exc:
                 self._flash(self._localized_json_error(str(exc)), error=True)
                 return
-            if parsed.mixed and not self._confirm_mixed_mode(parsed.key_styles):
+            if compact and json5_minify_risks(text, parsed) and not self._confirm_json5_minify():
+                self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
+                return
+            if not compact and parsed.mixed and not self._confirm_mixed_mode(parsed.key_styles):
                 self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
                 return
             value = parsed.value
             prefix, suffix = parsed.start, len(text) - parsed.end
-            output = render_json(value, compact=compact, key_style=style)
+            output = render_json(value, compact=compact, key_style=style, string_quote=string_quote)
         cursor = self.editor.textCursor()
         self.current_value = value
         self.rendered_text = output
@@ -2250,6 +2308,35 @@ class JsonWindow(QMainWindow):
             message += self.tr("；特殊键名保留引号", "; special keys remain quoted")
         self._flash(message)
         self.update_path()
+
+    def _confirm_value_quote_change(self, count: int, value_quote: str) -> bool:
+        quote_name = self.tr("单引号", "single quotes") if value_quote == "single" else self.tr("双引号", "double quotes")
+        result = QMessageBox.question(
+            self,
+            APP_NAME,
+            self.tr(
+                "有 {count} 个字符串值包含{quote_name}，转换后将自动添加转义符。是否继续？",
+                "{count} string value(s) contain {quote_name}; converting them will add escape characters. Continue?",
+                count=count,
+                quote_name=quote_name,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
+
+    def _confirm_json5_minify(self) -> bool:
+        result = QMessageBox.question(
+            self,
+            APP_NAME,
+            self.tr(
+                "当前内容包含 JSON5 写法。压缩后将转换为标准 JSON，注释、尾随逗号及原有的单引号/无引号属性名、数字或字符串写法可能会被改写或移除。是否继续？",
+                "This content uses JSON5 syntax. Minifying will convert it to standard JSON; comments, trailing commas, and original quote, unquoted-key, number, or string forms may be changed or removed. Continue?",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
 
     def _confirm_mixed_mode(self, styles) -> bool:
         names = {
@@ -2409,10 +2496,16 @@ class JsonWindow(QMainWindow):
         self.tab_right_button.setAccessibleName(right_tip)
 
         self.format_button.setText(self.tr("格式化", "Format"))
+        self.format_button.setToolTip(self.tr(
+            "格式化 JSON / JSON5，保留注释、引号和数字写法",
+            "Format JSON / JSON5 while preserving comments, quotes, and number spelling",
+        ))
         self.compact_button.setText(self.tr("压缩JSON", "Minify JSON"))
-        self.bare_button.setText(self.tr("键名无引号", "Unquoted Keys"))
-        self.double_button.setText(self.tr("键名双引号", "Double-Quoted Keys"))
-        self.single_button.setText(self.tr("键名单引号", "Single-Quoted Keys"))
+        self.bare_button.setText(self.tr("key无引号", "Unquoted Keys"))
+        self.double_button.setText(self.tr("key双引号", "Double-Quoted Keys"))
+        self.single_button.setText(self.tr("key单引号", "Single-Quoted Keys"))
+        self.key_value_double_button.setText(self.tr("value双引号", "Double-Quoted Values"))
+        self.key_value_single_button.setText(self.tr("value单引号", "Single-Quoted Values"))
         self.wrap_button.setText(self.tr("换行", "Wrap"))
         self.wrap_button.setToolTip(self.tr("切换过长行是否自动换行", "Toggle wrapping for long lines"))
         self.paste_button.setText(self.tr("从剪贴板粘贴", "Paste from Clipboard"))

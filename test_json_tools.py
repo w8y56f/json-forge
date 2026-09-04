@@ -1,7 +1,8 @@
 import unittest
 
 from json_tools import (
-    JsonToolError, parse_json_like, path_at_position, render_json, transform,
+    JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json,
+    rewrite_json_like_quotes, transform,
     searchable_spans, value_stats,
 )
 
@@ -32,6 +33,28 @@ class JsonToolsTest(unittest.TestCase):
         self.assertIn('normal: "a:b"', bare)
         self.assertIn('"has space": "value"', bare)
 
+    def test_quote_rewrites_preserve_layout_comments_and_unrelated_tokens(self):
+        source = "{ name: 'Alice', /* note */ \"city\" : 'Taipei', 'tags': [\"JSON\", .5,], }"
+
+        double, _, escaped = rewrite_json_like_quotes(source, value_quote="double")
+        self.assertEqual(escaped, 0)
+        self.assertIn('name: "Alice"', double)
+        self.assertIn('/* note */ "city" : "Taipei"', double)
+        self.assertIn("'tags': [\"JSON\", .5,], }", double)
+
+        key_single, _, escaped = rewrite_json_like_quotes(source, key_style="single")
+        self.assertEqual(escaped, 0)
+        self.assertIn("'name': 'Alice'", key_single)
+        self.assertIn("/* note */ 'city' : 'Taipei'", key_single)
+        self.assertIn("'tags': [\"JSON\", .5,], }", key_single)
+
+    def test_value_quote_rewrite_reports_when_target_quote_needs_escaping(self):
+        source = """{note: "He said 'hi'", other: "plain"}"""
+        output, _, escaped = rewrite_json_like_quotes(source, value_quote="single")
+        self.assertEqual(escaped, 1)
+        self.assertIn("note: 'He said \\'hi\\''", output)
+        self.assertIn("other: 'plain'", output)
+
     def test_repeated_style_changes_keep_outer_object(self):
         value = {"skills": ["Java", "SQL", "Docker"], "name": "developer"}
         bare = render_json(value, key_style="bare")
@@ -57,6 +80,82 @@ class JsonToolsTest(unittest.TestCase):
         parsed = parse_json_like("{'name': \"张三\", 'age': 30}")
         self.assertFalse(parsed.mixed)
         self.assertEqual(parsed.key_styles, frozenset({"single"}))
+
+    def test_json5_parser_supports_comments_relaxed_numbers_and_trailing_commas(self):
+        source = '''{
+            // User profile
+            name: 'Alice',
+            ratio: .5,
+            color: 0xFFAA00,
+            offset: +1,
+            tags: ['json', 'json5',],
+        }'''
+
+        parsed = parse_json_like(source)
+
+        self.assertEqual(parsed.value["name"], "Alice")
+        self.assertEqual(parsed.value["ratio"], 0.5)
+        self.assertEqual(parsed.value["color"], 0xFFAA00)
+        self.assertEqual(parsed.value["offset"], 1)
+        self.assertEqual(parsed.value["tags"], ["json", "json5"])
+
+    def test_json5_parser_supports_unicode_and_escaped_unquoted_keys(self):
+        source = r'''{
+            中文键名: '可以使用',
+            $enabled: true,
+            \u0066oo: .5,
+        }'''
+
+        output, parsed = format_json_like(source)
+
+        self.assertEqual(parsed.value, {"中文键名": "可以使用", "$enabled": True, "foo": 0.5})
+        self.assertIn("中文键名: '可以使用'", output)
+        self.assertIn(r"\u0066oo: .5", output)
+
+    def test_json5_minify_risks_ignore_standard_json_whitespace(self):
+        source = '''{
+            "name": "Alice",
+            "items": [1, 2]
+        }'''
+        self.assertEqual(json5_minify_risks(source), frozenset())
+
+    def test_json5_minify_risks_detects_lossy_syntax(self):
+        source = '''{
+            // note
+            name: 'Alice',
+            ratio: .5,
+            tags: [1,],
+            continued: "first\\
+second",
+        }'''
+        self.assertEqual(
+            json5_minify_risks(source),
+            frozenset({
+                "comments", "bare_keys", "single_quotes", "json5_literals",
+                "trailing_commas", "json5_string_escapes",
+            }),
+        )
+
+    def test_lossless_json5_formatter_keeps_comments_literals_and_trailing_commas(self):
+        source = '''{
+// User profile
+name:'Alice',
+ratio:.5,
+color:0xFFAA00, /* theme color */
+tags:['json','json5',],
+message:'first\\
+second',
+}'''
+
+        output, parsed = format_json_like(source)
+
+        self.assertEqual(parsed.value["color"], 0xFFAA00)
+        self.assertIn("// User profile", output)
+        self.assertIn("name: 'Alice'", output)
+        self.assertIn("ratio: .5", output)
+        self.assertIn("color: 0xFFAA00, /* theme color */", output)
+        self.assertIn("'json5',\n\t]", output)
+        self.assertIn("'first\\\nsecond'", output)
 
     def test_searchable_key_and_value_spans(self):
         text = '{"name":"Alice", age:30, \'city\':"广州"}'

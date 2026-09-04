@@ -217,6 +217,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertTrue(self.window.editor.brace_guides_visible)
         self.window.apply_language("en")
         self.assertEqual(self.window.compact_button.text(), "Minify JSON")
+        self.assertIn("preserving comments", self.window.format_button.toolTip())
         self.assertEqual(self.window.wrap_button.text(), "Wrap")
         self.assertEqual(self.window.tab_bar.rename_hint, "Double-click the tab title to rename")
         self.assertEqual(self.window.path_label.text(), "Path  $")
@@ -256,6 +257,15 @@ class LanguageUiTests(unittest.TestCase):
             QPlainTextEdit.LineWrapMode.WidgetWidth,
         )
 
+        self.assertEqual(
+            toolbar_layout.indexOf(self.window.single_button) + 1,
+            toolbar_layout.indexOf(self.window.key_value_double_button),
+        )
+        self.assertEqual(
+            toolbar_layout.indexOf(self.window.key_value_double_button) + 1,
+            toolbar_layout.indexOf(self.window.key_value_single_button),
+        )
+
         self.window.wrap_button.click()
         self.assertFalse(self.window.settings.value("line_wrap", True, type=bool))
         self.assertEqual(
@@ -292,6 +302,51 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(self.window.editor_font_size, 8)
         self.window.adjust_editor_font_size(0)
         self.assertEqual(self.window.editor_font_size, 13)
+
+    def test_format_button_preserves_json5_comments_and_literal_spelling(self):
+        self.window.editor.setPlainText("{\n// note\nname:'Alice',\nratio:.5,\ntags:[1,2,],\n}")
+
+        self.window.apply_transform(False, "double", preserve_source=True)
+
+        output = self.window.editor.toPlainText()
+        self.assertIn("// note", output)
+        self.assertIn("name: 'Alice'", output)
+        self.assertIn("ratio: .5", output)
+        self.assertIn("2,\n\t]", output)
+
+    def test_minify_confirms_before_normalizing_json5_source(self):
+        source = "{\n// note\nname:'Alice',\n}"
+        self.window.editor.setPlainText(source)
+
+        with patch.object(self.window, "_confirm_json5_minify", return_value=False) as confirm:
+            self.window.apply_transform(True, "double")
+
+        confirm.assert_called_once()
+        self.assertEqual(self.window.editor.toPlainText(), source)
+
+    def test_minify_does_not_confirm_for_pretty_standard_json(self):
+        self.window.editor.setPlainText('{\n  "name": "Alice"\n}')
+
+        with patch.object(self.window, "_confirm_json5_minify") as confirm:
+            self.window.apply_transform(True, "double")
+
+        confirm.assert_not_called()
+        self.assertEqual(self.window.editor.toPlainText(), '{"name":"Alice"}')
+
+    def test_quote_buttons_rewrite_only_requested_tokens_without_reformatting(self):
+        self.window.editor.setPlainText("{ name: 'Alice', city : 'Taipei', count: 2, }")
+
+        self.window.key_value_double_button.click()
+        self.assertEqual(
+            self.window.editor.toPlainText(),
+            '{ name: "Alice", city : "Taipei", count: 2, }',
+        )
+
+        self.window.double_button.click()
+        self.assertEqual(
+            self.window.editor.toPlainText(),
+            '{ "name": "Alice", "city" : "Taipei", "count": 2, }',
+        )
 
     def test_tab_context_menu_contains_localized_rename_action(self):
         self.assertEqual(self.window.tab_bar.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
