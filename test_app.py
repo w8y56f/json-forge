@@ -167,12 +167,15 @@ class PlatformHintTests(unittest.TestCase):
         self.assertIn("⌘↵ 格式化", hint)
         self.assertIn("⌘⇧M 紧凑", hint)
         self.assertIn("⌘滚轮 / ⌘+−0 缩放", hint)
+        self.assertIn("选中字段时自动显示JSONPath", hint)
+        self.assertIn("⌘F2 添加/取消书签 · F2/⇧F2 跳转", hint)
 
     def test_windows_uses_ctrl_labels(self):
         hint = platform_shortcut_hint("win32")
         self.assertIn("Ctrl+Enter 格式化", hint)
         self.assertIn("Ctrl+Shift+M 紧凑", hint)
         self.assertIn("Ctrl+滚轮 / Ctrl++−0 缩放", hint)
+        self.assertIn("Ctrl+F2 添加/取消书签 · F2/Shift+F2 跳转", hint)
 
     def test_linux_uses_ctrl_labels(self):
         hint = platform_shortcut_hint("linux")
@@ -183,6 +186,8 @@ class PlatformHintTests(unittest.TestCase):
         hint = platform_shortcut_hint("win32", "en")
         self.assertIn("Ctrl+Enter Format", hint)
         self.assertIn("Ctrl+Shift+M Minify", hint)
+        self.assertIn("Select a field to show JSONPath", hint)
+        self.assertIn("Ctrl/Cmd+F2 Toggle Bookmark", hint)
 
 
 class LanguageUiTests(unittest.TestCase):
@@ -324,6 +329,19 @@ class LanguageUiTests(unittest.TestCase):
         confirm.assert_called_once()
         self.assertEqual(self.window.editor.toPlainText(), source)
 
+    def test_minify_confirms_after_json5_quote_rewrite(self):
+        self.window.editor.setPlainText("{\n// note\nname:'Alice',\n}")
+        self.window.key_value_double_button.click()
+        rewritten = self.window.editor.toPlainText()
+        self.assertIn("// note", rewritten)
+        self.assertIn('name:"Alice"', rewritten)
+
+        with patch.object(self.window, "_confirm_json5_minify", return_value=False) as confirm:
+            self.window.apply_transform(True, "double")
+
+        confirm.assert_called_once()
+        self.assertEqual(self.window.editor.toPlainText(), rewritten)
+
     def test_minify_does_not_confirm_for_pretty_standard_json(self):
         self.window.editor.setPlainText('{\n  "name": "Alice"\n}')
 
@@ -347,6 +365,28 @@ class LanguageUiTests(unittest.TestCase):
             self.window.editor.toPlainText(),
             '{ "name": "Alice", "city" : "Taipei", "count": 2, }',
         )
+
+    def test_transform_preserves_editor_scroll_position(self):
+        editor = self.window.editor
+        editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        editor.setPlainText("{\n" + ",\n".join(
+            f"item{index}: '" + "x" * 160 + "'" for index in range(80)
+        ) + "\n}")
+        self.app.processEvents()
+        vertical = editor.verticalScrollBar()
+        horizontal = editor.horizontalScrollBar()
+        self.assertGreater(vertical.maximum(), 0)
+        self.assertGreater(horizontal.maximum(), 0)
+        vertical.setValue(vertical.maximum() // 2)
+        horizontal.setValue(horizontal.maximum() // 2)
+        expected = (vertical.value(), horizontal.value())
+
+        self.window.apply_transform(
+            False, "double", preserve_presentation=True, value_quote="double",
+        )
+        self.app.processEvents()
+
+        self.assertEqual((vertical.value(), horizontal.value()), expected)
 
     def test_tab_context_menu_contains_localized_rename_action(self):
         self.assertEqual(self.window.tab_bar.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)

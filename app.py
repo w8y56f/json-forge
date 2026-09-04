@@ -212,16 +212,20 @@ def platform_shortcut_hint(platform_name: str | None = None, language: str = "zh
         format_shortcut = "⌘↵"
         compact_shortcut = "⌘⇧M"
         zoom_shortcut = "⌘滚轮 / ⌘+−0"
+        bookmark_shortcut = "鼠标点击行号左侧或 ⌘F2 添加/取消书签 · F2/⇧F2 跳转"
     else:
         format_shortcut = "Ctrl+Enter"
         compact_shortcut = "Ctrl+Shift+M"
         zoom_shortcut = "Ctrl+滚轮 / Ctrl++−0"
+        bookmark_shortcut = "鼠标点击行号左侧或 Ctrl+F2 添加/取消书签 · F2/Shift+F2 跳转"
     return localized(
         language,
         f"{format_shortcut} 格式化   ·   {compact_shortcut} 紧凑"
-        f"   ·   {zoom_shortcut} 缩放   ·   光标移动时自动显示 JSONPath",
+        f"   ·   {zoom_shortcut} 缩放   ·   选中字段时自动显示JSONPath"
+        f"   ·   {bookmark_shortcut}",
         f"{format_shortcut} Format   ·   {compact_shortcut} Minify"
-        f"   ·   {zoom_shortcut} Zoom   ·   Move the cursor to show JSONPath",
+        f"   ·   {zoom_shortcut} Zoom   ·   Select a field to show JSONPath"
+        f"   ·   Ctrl/Cmd+F2 Toggle Bookmark · F2/Shift+F2 Navigate Bookmarks",
     )
 
 
@@ -2261,6 +2265,9 @@ class JsonWindow(QMainWindow):
             value = parsed.value
             prefix, suffix = parsed.start, len(text) - parsed.end
         elif self.current_value is not None and text == self.rendered_text:
+            if compact and json5_minify_risks(text) and not self._confirm_json5_minify():
+                self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
+                return
             value = self.current_value
             output = render_json(value, compact=compact, key_style=style, string_quote=string_quote)
             prefix = suffix = 0
@@ -2279,13 +2286,26 @@ class JsonWindow(QMainWindow):
             value = parsed.value
             prefix, suffix = parsed.start, len(text) - parsed.end
             output = render_json(value, compact=compact, key_style=style, string_quote=string_quote)
-        cursor = self.editor.textCursor()
+        editor = self.editor
+        cursor = editor.textCursor()
+        vertical_scroll = editor.verticalScrollBar().value()
+        horizontal_scroll = editor.horizontalScrollBar().value()
         self.current_value = value
         self.rendered_text = output
-        self.editor.clear_bookmarks()
-        self.editor.setPlainText(output)
+        editor.clear_bookmarks()
+        editor.setPlainText(output)
         cursor.setPosition(min(cursor.position(), len(output)))
-        self.editor.setTextCursor(cursor)
+        editor.setTextCursor(cursor)
+
+        def restore_scroll_position() -> None:
+            # Setting the cursor makes Qt call ensureCursorVisible(). Restore
+            # after the queued layout update so transformations do not move
+            # the reader's viewport to the cursor (often near the document end).
+            editor.verticalScrollBar().setValue(vertical_scroll)
+            editor.horizontalScrollBar().setValue(horizontal_scroll)
+
+        restore_scroll_position()
+        QTimer.singleShot(0, restore_scroll_position)
         self.key_style = style
         self.compact_mode = compact
         count, depth = value_stats(value)
