@@ -187,7 +187,7 @@ class PlatformHintTests(unittest.TestCase):
         self.assertIn("Ctrl+Enter Format", hint)
         self.assertIn("Ctrl+Shift+M Minify", hint)
         self.assertIn("Select a field to show JSONPath", hint)
-        self.assertIn("Ctrl/Cmd+F2 Toggle Bookmark", hint)
+        self.assertIn("Click left of a line number or Ctrl/Cmd+F2 to Toggle Bookmark", hint)
 
 
 class LanguageUiTests(unittest.TestCase):
@@ -226,6 +226,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(self.window.wrap_button.text(), "Wrap")
         self.assertEqual(self.window.tab_bar.rename_hint, "Double-click the tab title to rename")
         self.assertEqual(self.window.path_label.text(), "Path  $")
+        self.assertEqual(self.window.copy_path_label.text(), "Copy JSON Path ->")
         self.assertIn("Waiting for input", self.window.stats_label.text())
         self.assertEqual(self.window.settings.value("language"), "en")
 

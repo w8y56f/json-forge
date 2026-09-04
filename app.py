@@ -225,7 +225,8 @@ def platform_shortcut_hint(platform_name: str | None = None, language: str = "zh
         f"   ·   {bookmark_shortcut}",
         f"{format_shortcut} Format   ·   {compact_shortcut} Minify"
         f"   ·   {zoom_shortcut} Zoom   ·   Select a field to show JSONPath"
-        f"   ·   Ctrl/Cmd+F2 Toggle Bookmark · F2/Shift+F2 Navigate Bookmarks",
+        f"   ·   Click left of a line number or Ctrl/Cmd+F2 to Toggle Bookmark"
+        f" · F2/Shift+F2 Navigate Bookmarks",
     )
 
 
@@ -1472,6 +1473,7 @@ class JsonWindow(QMainWindow):
         status.setMinimumHeight(38)
         self.path_label = QLabel("路径  $")
         self.path_label.setObjectName("path")
+        self.copy_path_label = QLabel("复制JSON Path ->")
         self.copy_full = QToolButton()
         self.copy_full.setText("复制 $")
         self.copy_plain = QToolButton()
@@ -1480,6 +1482,7 @@ class JsonWindow(QMainWindow):
         self.stats_label = QLabel("等待输入")
         self.bookmark_label = QLabel("书签 0 / 0")
         status.addWidget(self.path_label, 1)
+        status.addWidget(self.copy_path_label)
         status.addWidget(self.copy_full)
         status.addWidget(self.copy_plain)
         status.addWidget(self.bookmark_label)
@@ -2551,6 +2554,7 @@ class JsonWindow(QMainWindow):
             editor.setPlaceholderText(placeholder)
             editor.json_stats_text = self._localized_editor_stats(editor)
 
+        self.copy_path_label.setText(self.tr("复制JSON Path ->", "Copy JSON Path ->"))
         self.copy_full.setText(self.tr("复制 $", "Copy $"))
         self.copy_plain.setText(self.tr("复制无 $", "Copy without $"))
         self._update_bookmark_status()
