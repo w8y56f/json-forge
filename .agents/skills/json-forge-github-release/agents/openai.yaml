@@ -1,0 +1,4 @@
+interface:
+  display_name: "JSON Forge GitHub Release"
+  short_description: "Publish version tags, release notes, and four JSON Forge packages"
+  default_prompt: "Use $json-forge-github-release to publish the current JSON Forge version with release notes and all four packages to its GitHub repository."

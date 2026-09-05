@@ -1,0 +1,4 @@
+interface:
+  display_name: "JSON Forge test-public Release"
+  short_description: "Encrypt a Windows ZIP and replace test-public's v2 release asset"
+  default_prompt: "Use $json-forge-test-public-release to encrypt and publish a selected JSON Forge Windows ZIP as jf.sa on w8y56f/test-public Release v2, asking which version if unclear."
