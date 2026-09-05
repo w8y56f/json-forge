@@ -1100,7 +1100,7 @@ class JsonWindow(QMainWindow):
         self.default_hint = platform_shortcut_hint(language=self.language)
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(application_icon_path())))
-        self.resize(1080, 720)
+        self.resize(1560, 720)
         self.setMinimumSize(760, 480)
         self._build_ui()
         self._connect()
@@ -1427,6 +1427,7 @@ class JsonWindow(QMainWindow):
         self.single_button = self._button("key单引号")
         self.key_value_double_button = self._button("value双引号")
         self.key_value_single_button = self._button("value单引号")
+        self.copy_postman_button = self._button("拷贝Postman JSON")
         self.wrap_button = self._button("换行")
         self.wrap_button.setCheckable(True)
         self.wrap_button.setChecked(self.line_wrap_enabled)
@@ -1436,7 +1437,7 @@ class JsonWindow(QMainWindow):
         self.clear_button = self._button("清空")
         for button in (self.format_button, self.compact_button, self.bare_button,
                        self.double_button, self.single_button, self.key_value_double_button,
-                       self.key_value_single_button):
+                       self.key_value_single_button, self.copy_postman_button):
             tools.addWidget(button)
         tools.addStretch()
         tools.addWidget(self.wrap_button)
@@ -1582,6 +1583,7 @@ class JsonWindow(QMainWindow):
             lambda: self.apply_transform(False, "double", preserve_source=True)
         )
         self.compact_button.clicked.connect(lambda: self.apply_transform(True, "double"))
+        self.copy_postman_button.clicked.connect(self.copy_postman_json)
         self.bare_button.clicked.connect(lambda: self.apply_transform(
             self.compact_mode, "bare", preserve_presentation=True
         ))
@@ -2228,6 +2230,29 @@ class JsonWindow(QMainWindow):
             return f"Missing a comma or closing brace near character {match.group(1)}"
         return "Invalid JSON: " + message
 
+    def copy_postman_json(self):
+        text = self.editor.toPlainText()
+        try:
+            if not text.strip():
+                QMessageBox.warning(self, APP_NAME, self.tr("请先粘贴 JSON", "Paste JSON first"))
+                return
+            value = (
+                self.current_value
+                if self.current_value is not None and text == self.rendered_text
+                else parse_json_like(text).value
+            )
+            output = render_json(value, compact=True, key_style="double", string_quote="double")
+        except (JsonToolError, ValueError, RecursionError) as exc:
+            QMessageBox.warning(self, APP_NAME, self._localized_json_error(str(exc)))
+            return
+        QApplication.clipboard().setText(output)
+        message = self.tr("已放进剪切板", "Copied to clipboard")
+        self._flash(message)
+        button = self.copy_postman_button
+        QToolTip.showText(
+            button.mapToGlobal(button.rect().bottomLeft()), message, button, button.rect(), 3500
+        )
+
     def apply_transform(
         self,
         compact: bool,
@@ -2529,6 +2554,12 @@ class JsonWindow(QMainWindow):
         self.single_button.setText(self.tr("key单引号", "Single-Quoted Keys"))
         self.key_value_double_button.setText(self.tr("value双引号", "Double-Quoted Values"))
         self.key_value_single_button.setText(self.tr("value单引号", "Single-Quoted Values"))
+        self.copy_postman_button.setText(self.tr("拷贝Postman JSON", "Copy Postman JSON"))
+        self.copy_postman_button.setToolTip(self.tr(
+            "拷贝可作为Postman参数的json,会进行规整化,如去掉json5之类的注释等",
+            "Copy JSON for use as Postman parameters. The JSON will be normalized, "
+            "removing JSON5 comments and other non-standard syntax.",
+        ))
         self.wrap_button.setText(self.tr("换行", "Wrap"))
         self.wrap_button.setToolTip(self.tr("切换过长行是否自动换行", "Toggle wrapping for long lines"))
         self.paste_button.setText(self.tr("从剪贴板粘贴", "Paste from Clipboard"))

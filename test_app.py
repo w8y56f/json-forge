@@ -222,6 +222,8 @@ class LanguageUiTests(unittest.TestCase):
         self.assertTrue(self.window.editor.brace_guides_visible)
         self.window.apply_language("en")
         self.assertEqual(self.window.compact_button.text(), "Minify JSON")
+        self.assertEqual(self.window.copy_postman_button.text(), "Copy Postman JSON")
+        self.assertIn("removing JSON5 comments", self.window.copy_postman_button.toolTip())
         self.assertIn("preserving comments", self.window.format_button.toolTip())
         self.assertEqual(self.window.wrap_button.text(), "Wrap")
         self.assertEqual(self.window.tab_bar.rename_hint, "Double-click the tab title to rename")
@@ -246,6 +248,8 @@ class LanguageUiTests(unittest.TestCase):
 
         self.window.apply_language("zh_CN")
         self.assertEqual(self.window.compact_button.text(), "压缩JSON")
+        self.assertEqual(self.window.copy_postman_button.text(), "拷贝Postman JSON")
+        self.assertIn("去掉json5", self.window.copy_postman_button.toolTip())
         self.assertEqual(self.window.wrap_button.text(), "换行")
         self.assertEqual(self.window.tab_bar.rename_hint, "双击标签标题可重命名")
 
@@ -319,6 +323,51 @@ class LanguageUiTests(unittest.TestCase):
         self.assertIn("name: 'Alice'", output)
         self.assertIn("ratio: .5", output)
         self.assertIn("2,\n\t]", output)
+
+    def test_copy_postman_normalizes_silently_without_changing_editor(self):
+        source = "{\n// note\nname:'Alice', ratio:.5, tags:[1,2,],\n}"
+        self.window.editor.setPlainText(source)
+        layout = self.window.copy_postman_button.parentWidget().layout()
+        self.assertEqual(
+            layout.indexOf(self.window.copy_postman_button),
+            layout.indexOf(self.window.key_value_single_button) + 1,
+        )
+        with patch.object(self.window, "_confirm_json5_minify") as confirm, \
+                patch("app.QMessageBox.warning") as warning, \
+                patch("app.QToolTip.showText") as toast:
+            self.window.copy_postman_button.click()
+        confirm.assert_not_called()
+        warning.assert_not_called()
+        toast.assert_called_once()
+        self.assertEqual(QApplication.clipboard().text(), '{"name":"Alice","ratio":0.5,"tags":[1,2]}')
+        self.assertEqual(self.window.editor.toPlainText(), source)
+        self.assertEqual(self.window.hint.text(), "已放进剪切板")
+
+    def test_copy_postman_after_quote_rewrite_and_in_english(self):
+        self.window.apply_language("en")
+        self.window.editor.setPlainText('{"name":"Alice"}')
+        self.window.key_value_single_button.click()
+        with patch("app.QToolTip.showText") as toast:
+            self.window.copy_postman_button.click()
+        self.assertEqual(QApplication.clipboard().text(), '{"name":"Alice"}')
+        self.assertEqual(toast.call_args.args[1], "Copied to clipboard")
+
+    def test_copy_postman_invalid_or_empty_input_shows_error_and_preserves_clipboard(self):
+        for language in ("zh_CN", "en"):
+            self.window.apply_language(language)
+            for source in ('{"name": }', '   '):
+                with self.subTest(language=language, source=source):
+                    self.window.editor.setPlainText(source)
+                    QApplication.clipboard().setText("previous clipboard")
+                    with patch("app.QMessageBox.warning") as warning, \
+                            patch("app.QToolTip.showText") as toast:
+                        self.window.copy_postman_button.click()
+                    warning.assert_called_once()
+                    toast.assert_not_called()
+                    self.assertEqual(QApplication.clipboard().text(), "previous clipboard")
+                    self.assertEqual(self.window.editor.toPlainText(), source)
+                    if language == "en":
+                        self.assertTrue(warning.call_args.args[2].isascii())
 
     def test_minify_confirms_before_normalizing_json5_source(self):
         source = "{\n// note\nname:'Alice',\n}"
