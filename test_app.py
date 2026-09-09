@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QPlainTextEdit
+from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit
 
 from app import (
     JsonEditor,
@@ -489,6 +489,38 @@ class LanguageUiTests(unittest.TestCase):
             localized_message,
             "No complete, valid JSON object or array was found (near line 2, column 7)",
         )
+
+    def test_format_error_is_shown_in_a_confirmable_dialog(self):
+        self.window.editor.setPlainText('{"name": }')
+
+        with patch.object(self.window, "_show_json_error") as show_error:
+            self.window.format_button.click()
+
+        show_error.assert_called_once_with(
+            "第 10 个字符附近不是有效的 JSON 值", '{"name": }',
+        )
+
+    def test_json_error_location_includes_character_line_and_column(self):
+        location = self.window._json_error_location(
+            "第 12 个字符附近不是有效的属性名", "{\n  first: 1,\n  !bad: 2\n}",
+        )
+
+        self.assertEqual(location, (12, 2, 10))
+
+    def test_json_error_dialog_has_confirm_button(self):
+        with patch("app.QMessageBox") as dialog_type:
+            self.window._show_json_error(
+                "第 632 个字符附近不是有效的属性名", "\n" * 24 + "x" * 700,
+            )
+
+        dialog = dialog_type.return_value
+        dialog.setWindowTitle.assert_called_once_with("JSON 格式错误")
+        dialog.setText.assert_called_once_with(
+            "第 632 个字符附近不是有效的属性名\n\n位置：第 632 个字符（第 25 行，第 608 列）"
+        )
+        dialog.addButton.assert_called_once()
+        self.assertEqual(dialog.addButton.call_args.args[0], "确认")
+        dialog.exec.assert_called_once()
 
 
 class BraceMatchingTests(unittest.TestCase):

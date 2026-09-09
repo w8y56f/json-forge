@@ -2230,6 +2230,43 @@ class JsonWindow(QMainWindow):
             return f"Missing a comma or closing brace near character {match.group(1)}"
         return "Invalid JSON: " + message
 
+    @staticmethod
+    def _json_error_location(message: str, text: str) -> tuple[int, int, int] | None:
+        """Map a parser's one-based character position to editor coordinates."""
+        match = re.match(r"第 (\d+) 个字符附近", message)
+        if not match:
+            return None
+        character = int(match.group(1))
+        offset = min(max(character - 1, 0), len(text))
+        line = text.count("\n", 0, offset) + 1
+        previous_newline = text.rfind("\n", 0, offset)
+        column = offset - previous_newline
+        return character, line, column
+
+    def _show_json_error(self, message: str, text: str | None = None) -> None:
+        """Show parsing failures where they can be read before continuing."""
+        localized_message = self._localized_json_error(message)
+        if text is not None and (location := self._json_error_location(message, text)):
+            character, line, column = location
+            localized_message += self.tr(
+                "\n\n位置：第 {character} 个字符（第 {line} 行，第 {column} 列）",
+                "\n\nLocation: character {character} (line {line}, column {column})",
+                character=character,
+                line=line,
+                column=column,
+            )
+        self._flash(localized_message, error=True)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.tr("JSON 格式错误", "Invalid JSON"))
+        box.setText(localized_message)
+        confirm_button = box.addButton(
+            self.tr("确认", "OK"), QMessageBox.ButtonRole.AcceptRole,
+        )
+        box.setDefaultButton(confirm_button)
+        box.setEscapeButton(confirm_button)
+        box.exec()
+
     def copy_postman_json(self):
         text = self.editor.toPlainText()
         try:
@@ -2276,7 +2313,7 @@ class JsonWindow(QMainWindow):
                     parsed=parsed,
                 )
             except (JsonToolError, ValueError) as exc:
-                self._flash(self._localized_json_error(str(exc)), error=True)
+                self._show_json_error(str(exc), text)
                 return
             if escaped_value_count and not self._confirm_value_quote_change(escaped_value_count, value_quote):
                 self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
@@ -2288,7 +2325,7 @@ class JsonWindow(QMainWindow):
                 parsed = parse_json_like(text)
                 output, parsed = format_json_like(text, parsed)
             except (JsonToolError, ValueError) as exc:
-                self._flash(self._localized_json_error(str(exc)), error=True)
+                self._show_json_error(str(exc), text)
                 return
             value = parsed.value
             prefix, suffix = parsed.start, len(text) - parsed.end
@@ -2303,7 +2340,7 @@ class JsonWindow(QMainWindow):
             try:
                 parsed = parse_json_like(text)
             except (JsonToolError, ValueError) as exc:
-                self._flash(self._localized_json_error(str(exc)), error=True)
+                self._show_json_error(str(exc), text)
                 return
             if compact and json5_minify_risks(text, parsed) and not self._confirm_json5_minify():
                 self._flash(self.tr("已取消，原始内容保持不变", "Cancelled; original content unchanged"))
