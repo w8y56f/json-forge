@@ -2318,6 +2318,10 @@ class JsonWindow(QMainWindow):
         cursor = editor.textCursor()
         vertical_scroll = editor.verticalScrollBar().value()
         horizontal_scroll = editor.horizontalScrollBar().value()
+        # Formatting is an explicit request to present the document cleanly.
+        # Start at its left edge if it becomes wider than the editor.
+        if preserve_source:
+            horizontal_scroll = 0
         self.current_value = value
         self.rendered_text = output
         editor.clear_bookmarks()
@@ -2658,8 +2662,16 @@ class JsonWindow(QMainWindow):
                 QMenu { background: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1; padding: 5px; }
                 QMenu::item { padding: 7px 24px; border-radius: 5px; }
                 QMenu::item:selected { background: #CCFBF1; }
-                QScrollBar:vertical { background: #F1F5F9; width: 11px; }
-                QScrollBar::handle:vertical { background: #CBD5E1; border-radius: 5px; min-height: 24px; }
+                QScrollBar:vertical, QScrollBar:horizontal { background: #E2E8F0; }
+                QScrollBar:vertical { width: 13px; margin: 1px; }
+                QScrollBar:horizontal { height: 13px; margin: 1px; }
+                QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                    background: #64748B; border: 2px solid #E2E8F0; border-radius: 5px;
+                    min-height: 28px; min-width: 28px;
+                }
+                QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #0D9488; }
+                QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed { background: #0F766E; }
+                QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
             """)
             self._apply_tab_style_override(theme)
             return
@@ -2709,8 +2721,16 @@ class JsonWindow(QMainWindow):
             QMenu { background: #111B2E; color: #DDE7F3; border: 1px solid #2B3A54; padding: 5px; }
             QMenu::item { padding: 7px 24px; border-radius: 5px; }
             QMenu::item:selected { background: #21314B; }
-            QScrollBar:vertical { background: #0E1728; width: 11px; }
-            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 24px; }
+            QScrollBar:vertical, QScrollBar:horizontal { background: #17243A; }
+            QScrollBar:vertical { width: 13px; margin: 1px; }
+            QScrollBar:horizontal { height: 13px; margin: 1px; }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                background: #718096; border: 2px solid #17243A; border-radius: 5px;
+                min-height: 28px; min-width: 28px;
+            }
+            QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #2DD4BF; }
+            QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed { background: #14B8A6; }
+            QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
         """)
         self._apply_tab_style_override(theme)
 

@@ -438,6 +438,26 @@ class LanguageUiTests(unittest.TestCase):
 
         self.assertEqual((vertical.value(), horizontal.value()), expected)
 
+    def test_format_resets_horizontal_scroll_to_left_edge(self):
+        editor = self.window.editor
+        editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        editor.setPlainText("{\n" + ",\n".join(
+            f'  "item{index}": "' + "x" * 160 + '"' for index in range(80)
+        ) + "\n}")
+        self.app.processEvents()
+        vertical = editor.verticalScrollBar()
+        horizontal = editor.horizontalScrollBar()
+        self.assertGreater(horizontal.maximum(), 0)
+        vertical.setValue(vertical.maximum() // 2)
+        horizontal.setValue(horizontal.maximum() // 2)
+        expected_vertical = vertical.value()
+
+        self.window.format_button.click()
+        self.app.processEvents()
+
+        self.assertEqual(vertical.value(), expected_vertical)
+        self.assertEqual(horizontal.value(), 0)
+
     def test_tab_context_menu_contains_localized_rename_action(self):
         self.assertEqual(self.window.tab_bar.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
         self.window.apply_language("en")
