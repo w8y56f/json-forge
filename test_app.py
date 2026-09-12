@@ -225,6 +225,9 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(self.window.copy_postman_button.text(), "Copy Postman JSON")
         self.assertEqual(self.window.remove_null_button.text(), "Remove Null Fields")
         self.assertEqual(self.window.sort_menu_button.text(), "Sort Actions")
+        self.assertEqual(self.window.focus_mode_button.text(), "Focus Editor")
+        tab_layout = self.window.tab_row_widget.layout()
+        self.assertEqual(tab_layout.indexOf(self.window.focus_mode_button), tab_layout.count() - 1)
         self.assertIn("removing JSON5 comments", self.window.copy_postman_button.toolTip())
         self.assertIn("preserving comments", self.window.format_button.toolTip())
         self.assertEqual(self.window.wrap_button.text(), "Wrap")
@@ -307,6 +310,26 @@ class LanguageUiTests(unittest.TestCase):
             self.window.editor.lineWrapMode(),
             QPlainTextEdit.LineWrapMode.WidgetWidth,
         )
+
+    def test_focus_mode_keeps_tabs_and_hides_non_editor_chrome(self):
+        self.assertFalse(self.window.focus_mode_enabled)
+        self.window.focus_mode_button.click()
+
+        self.assertTrue(self.window.focus_mode_enabled)
+        self.assertEqual(self.window.focus_mode_button.text(), "退出专注")
+        self.assertTrue(self.window.drag_bar.isHidden())
+        self.assertFalse(self.window.tab_row_widget.isHidden())
+        self.assertTrue(self.window.toolbar_container.isHidden())
+        self.assertTrue(self.window.hint_container.isHidden())
+        self.assertTrue(self.window.status_bar.isHidden())
+
+        self.window.toggle_focus_mode(False)
+        self.assertFalse(self.window.focus_mode_enabled)
+        self.assertEqual(self.window.focus_mode_button.text(), "专注编辑")
+        self.assertFalse(self.window.drag_bar.isHidden())
+        self.assertFalse(self.window.toolbar_container.isHidden())
+        self.assertFalse(self.window.hint_container.isHidden())
+        self.assertFalse(self.window.status_bar.isHidden())
 
     def test_editor_font_zoom_updates_all_tabs_and_persists(self):
         self.assertEqual(self.window.editor_font_size, 13)

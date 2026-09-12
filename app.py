@@ -1064,6 +1064,7 @@ class JsonWindow(QMainWindow):
         self.initial_search_selection: tuple[int, int] | None = None
         self.search_candidate_selection: tuple[int, int] | None = None
         self.selecting_search_match = False
+        self.focus_mode_enabled = False
         self._session_ready = False
         self._session_restoring = False
         self._session_dirty = False
@@ -1342,10 +1343,10 @@ class JsonWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 10)
         layout.setSpacing(0)
 
-        drag_bar = DragBar()
-        drag_bar.setObjectName("dragBar")
-        drag_bar.setMinimumHeight(42)
-        title_row = QHBoxLayout(drag_bar)
+        self.drag_bar = DragBar()
+        self.drag_bar.setObjectName("dragBar")
+        self.drag_bar.setMinimumHeight(42)
+        title_row = QHBoxLayout(self.drag_bar)
         title_row.setContentsMargins(20, 6, 18, 4)
         title = QLabel(APP_NAME)
         title.setObjectName("title")
@@ -1375,11 +1376,11 @@ class JsonWindow(QMainWindow):
         self.theme_menu.addAction(self.about_action)
         self.settings_button.setMenu(self.theme_menu)
         title_row.addWidget(self.settings_button)
-        layout.addWidget(drag_bar)
+        layout.addWidget(self.drag_bar)
 
-        tab_row_widget = QFrame()
-        tab_row_widget.setObjectName("tabRow")
-        tab_row = QHBoxLayout(tab_row_widget)
+        self.tab_row_widget = QFrame()
+        self.tab_row_widget.setObjectName("tabRow")
+        tab_row = QHBoxLayout(self.tab_row_widget)
         tab_row.setContentsMargins(20, 4, 20, 5)
         tab_row.setSpacing(5)
         self.tab_bar = DocumentTabBar()
@@ -1408,12 +1409,15 @@ class JsonWindow(QMainWindow):
         self.add_tab_button.setObjectName("addTab")
         self.add_tab_button.setText("+(0)")
         self.add_tab_button.setToolTip("新建标签页")
+        self.focus_mode_button = self._button("专注编辑")
+        self.focus_mode_button.setCheckable(True)
         tab_row.addWidget(self.tab_bar)
         tab_row.addWidget(self.tab_left_button)
         tab_row.addWidget(self.tab_right_button)
         tab_row.addWidget(self.add_tab_button)
         tab_row.addStretch()
-        layout.addWidget(tab_row_widget)
+        tab_row.addWidget(self.focus_mode_button)
+        layout.addWidget(self.tab_row_widget)
 
         toolbar = QFrame()
         toolbar.setObjectName("toolbar")
@@ -1460,11 +1464,11 @@ class JsonWindow(QMainWindow):
         tools.addWidget(self.fold_button)
         tools.addWidget(self.paste_button)
         tools.addWidget(self.clear_button)
-        toolbar_container = QWidget()
-        toolbar_layout = QVBoxLayout(toolbar_container)
+        self.toolbar_container = QWidget()
+        toolbar_layout = QVBoxLayout(self.toolbar_container)
         toolbar_layout.setContentsMargins(20, 7, 20, 0)
         toolbar_layout.addWidget(toolbar)
-        layout.addWidget(toolbar_container)
+        layout.addWidget(self.toolbar_container)
 
         self.editor_stack = QStackedWidget()
         self.editor_stack.setObjectName("editorStack")
@@ -1478,16 +1482,16 @@ class JsonWindow(QMainWindow):
 
         self.hint = QLabel(self.default_hint)
         self.hint.setObjectName("hint")
-        hint_container = QWidget()
-        hint_layout = QHBoxLayout(hint_container)
+        self.hint_container = QWidget()
+        hint_layout = QHBoxLayout(self.hint_container)
         hint_layout.setContentsMargins(20, 8, 20, 0)
         hint_layout.addWidget(self.hint)
-        layout.addWidget(hint_container)
+        layout.addWidget(self.hint_container)
         self.setCentralWidget(root)
 
-        status = QStatusBar()
-        status.setSizeGripEnabled(False)
-        status.setMinimumHeight(38)
+        self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
+        self.status_bar.setMinimumHeight(38)
         self.path_label = QLabel("路径  $")
         self.path_label.setObjectName("path")
         self.copy_path_label = QLabel("复制JSON Path ->")
@@ -1498,14 +1502,14 @@ class JsonWindow(QMainWindow):
         self.position_label = QLabel("行 1，列 1")
         self.stats_label = QLabel("等待输入")
         self.bookmark_label = QLabel("书签 0 / 0")
-        status.addWidget(self.path_label, 1)
-        status.addWidget(self.copy_path_label)
-        status.addWidget(self.copy_full)
-        status.addWidget(self.copy_plain)
-        status.addWidget(self.bookmark_label)
-        status.addPermanentWidget(self.stats_label)
-        status.addPermanentWidget(self.position_label)
-        self.setStatusBar(status)
+        self.status_bar.addWidget(self.path_label, 1)
+        self.status_bar.addWidget(self.copy_path_label)
+        self.status_bar.addWidget(self.copy_full)
+        self.status_bar.addWidget(self.copy_plain)
+        self.status_bar.addWidget(self.bookmark_label)
+        self.status_bar.addPermanentWidget(self.stats_label)
+        self.status_bar.addPermanentWidget(self.position_label)
+        self.setStatusBar(self.status_bar)
 
     def _build_search_bar(self):
         self.search_bar = QFrame(self.editor_container)
@@ -1626,6 +1630,7 @@ class JsonWindow(QMainWindow):
         )
         self.wrap_button.toggled.connect(self.set_line_wrap_enabled)
         self.fold_button.clicked.connect(self.toggle_all_folds)
+        self.focus_mode_button.toggled.connect(self.toggle_focus_mode)
         self.paste_button.clicked.connect(self.paste)
         self.clear_button.clicked.connect(lambda: self.editor.clear())
         self.copy_full.clicked.connect(lambda: self.copy_path(True))
@@ -1662,6 +1667,12 @@ class JsonWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.apply_transform(True, "double"))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.add_tab)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
+        focus_modifier = "Meta" if sys.platform == "darwin" else "Ctrl"
+        QShortcut(
+            QKeySequence(f"{focus_modifier}+Shift+F"),
+            self,
+            activated=lambda: self.toggle_focus_mode(not self.focus_mode_enabled),
+        )
         zoom_modifier = "Meta" if sys.platform == "darwin" else "Ctrl"
         for key, adjustment in (("+", 1), ("=", 1), ("-", -1), ("0", 0)):
             QShortcut(
@@ -1674,6 +1685,35 @@ class JsonWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(lambda: self._save_session(force=True))
+
+    def toggle_focus_mode(self, enabled: bool):
+        """Show the editor with only its compact tab strip for more working room."""
+        self.focus_mode_enabled = enabled
+        self.drag_bar.setVisible(not enabled)
+        self.toolbar_container.setVisible(not enabled)
+        self.hint_container.setVisible(not enabled)
+        self.status_bar.setVisible(not enabled)
+        if self.focus_mode_button.isChecked() != enabled:
+            self.focus_mode_button.setChecked(enabled)
+        self._update_focus_mode_button()
+        self.editor.setFocus()
+
+    def _update_focus_mode_button(self):
+        shortcut = "⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F"
+        if self.focus_mode_enabled:
+            self.focus_mode_button.setText(self.tr("退出专注", "Exit Focus"))
+            self.focus_mode_button.setToolTip(self.tr(
+                "恢复完整界面（{shortcut}）",
+                "Restore the full interface ({shortcut})",
+                shortcut=shortcut,
+            ))
+        else:
+            self.focus_mode_button.setText(self.tr("专注编辑", "Focus Editor"))
+            self.focus_mode_button.setToolTip(self.tr(
+                "最大化编辑区域（{shortcut}）",
+                "Maximize the editor area ({shortcut})",
+                shortcut=shortcut,
+            ))
 
     def _create_editor(self) -> JsonEditor:
         editor = JsonEditor(
@@ -2824,6 +2864,7 @@ class JsonWindow(QMainWindow):
         ))
         self.wrap_button.setText(self.tr("换行", "Wrap"))
         self.wrap_button.setToolTip(self.tr("切换过长行是否自动换行", "Toggle wrapping for long lines"))
+        self._update_focus_mode_button()
         self.paste_button.setText(self.tr("从剪贴板粘贴", "Paste from Clipboard"))
         self.clear_button.setText(self.tr("清空", "Clear"))
 
