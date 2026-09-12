@@ -2,7 +2,7 @@ import unittest
 
 from json_tools import (
     JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json,
-    rewrite_json_like_quotes, transform,
+    rewrite_json_like_key_initials, rewrite_json_like_quotes, transform,
     searchable_spans, value_stats,
 )
 
@@ -54,6 +54,23 @@ class JsonToolsTest(unittest.TestCase):
         self.assertEqual(escaped, 1)
         self.assertIn("note: 'He said \\'hi\\''", output)
         self.assertIn("other: 'plain'", output)
+
+    def test_key_initial_rewrite_changes_only_ascii_key_initials(self):
+        source = "{ foo: 1, 'Bar': 2, 中文: 3, nested: { camelCase: 4 }, value: 'unchanged' }"
+
+        upper, _, changed = rewrite_json_like_key_initials(source, uppercase=True)
+        self.assertEqual(changed, 4)
+        self.assertEqual(
+            upper,
+            "{ Foo: 1, 'Bar': 2, 中文: 3, Nested: { CamelCase: 4 }, Value: 'unchanged' }",
+        )
+
+        lower, _, changed = rewrite_json_like_key_initials(upper, uppercase=False)
+        self.assertEqual(changed, 5)
+        self.assertEqual(
+            lower,
+            "{ foo: 1, 'bar': 2, 中文: 3, nested: { camelCase: 4 }, value: 'unchanged' }",
+        )
 
     def test_repeated_style_changes_keep_outer_object(self):
         value = {"skills": ["Java", "SQL", "Docker"], "name": "developer"}

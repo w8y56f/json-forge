@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from json_tools import (
-    JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_quotes,
+    JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_key_initials, rewrite_json_like_quotes,
     searchable_spans, value_stats,
 )
 from version_info import DISPLAY_VERSION
@@ -1422,12 +1422,29 @@ class JsonWindow(QMainWindow):
         tools.setSpacing(7)
         self.format_button = self._button("格式化", True)
         self.compact_button = self._button("压缩JSON")
-        self.bare_button = self._button("key无引号")
-        self.double_button = self._button('key双引号')
-        self.single_button = self._button("key单引号")
-        self.key_value_double_button = self._button("value双引号")
-        self.key_value_single_button = self._button("value单引号")
         self.copy_postman_button = self._button("拷贝Postman JSON")
+        self.remove_null_button = self._button("移除null值")
+        self.sort_menu_button = QToolButton()
+        self.sort_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.sort_menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sort_menu = QMenu(self.sort_menu_button)
+        self.sort_keys_ascending_action = self.sort_menu.addAction("按key升序")
+        self.sort_keys_descending_action = self.sort_menu.addAction("按key降序")
+        self.sort_menu_button.setMenu(self.sort_menu)
+        self.key_value_menu_button = QToolButton()
+        self.key_value_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.key_value_menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.key_value_menu = QMenu(self.key_value_menu_button)
+        self.bare_action = self.key_value_menu.addAction("key无引号")
+        self.double_action = self.key_value_menu.addAction("key双引号")
+        self.single_action = self.key_value_menu.addAction("key单引号")
+        self.key_value_menu.addSeparator()
+        self.key_value_double_action = self.key_value_menu.addAction("value双引号")
+        self.key_value_single_action = self.key_value_menu.addAction("value单引号")
+        self.key_value_menu.addSeparator()
+        self.key_initial_upper_action = self.key_value_menu.addAction("key首字母大写")
+        self.key_initial_lower_action = self.key_value_menu.addAction("key首字母小写")
+        self.key_value_menu_button.setMenu(self.key_value_menu)
         self.wrap_button = self._button("换行")
         self.wrap_button.setCheckable(True)
         self.wrap_button.setChecked(self.line_wrap_enabled)
@@ -1435,9 +1452,8 @@ class JsonWindow(QMainWindow):
         self.fold_button.setEnabled(False)
         self.paste_button = self._button("从剪贴板粘贴")
         self.clear_button = self._button("清空")
-        for button in (self.format_button, self.compact_button, self.bare_button,
-                       self.double_button, self.single_button, self.key_value_double_button,
-                       self.key_value_single_button, self.copy_postman_button):
+        for button in (self.format_button, self.compact_button, self.copy_postman_button,
+                       self.remove_null_button, self.sort_menu_button, self.key_value_menu_button):
             tools.addWidget(button)
         tools.addStretch()
         tools.addWidget(self.wrap_button)
@@ -1584,21 +1600,30 @@ class JsonWindow(QMainWindow):
         )
         self.compact_button.clicked.connect(lambda: self.apply_transform(True, "double"))
         self.copy_postman_button.clicked.connect(self.copy_postman_json)
-        self.bare_button.clicked.connect(lambda: self.apply_transform(
+        self.remove_null_button.clicked.connect(self.remove_null_fields)
+        self.sort_keys_ascending_action.triggered.connect(lambda: self.sort_keys(reverse=False))
+        self.sort_keys_descending_action.triggered.connect(lambda: self.sort_keys(reverse=True))
+        self.bare_action.triggered.connect(lambda: self.apply_transform(
             self.compact_mode, "bare", preserve_presentation=True
         ))
-        self.double_button.clicked.connect(lambda: self.apply_transform(
+        self.double_action.triggered.connect(lambda: self.apply_transform(
             self.compact_mode, "double", preserve_presentation=True
         ))
-        self.single_button.clicked.connect(lambda: self.apply_transform(
+        self.single_action.triggered.connect(lambda: self.apply_transform(
             self.compact_mode, "single", preserve_presentation=True
         ))
-        self.key_value_double_button.clicked.connect(lambda: self.apply_transform(
+        self.key_value_double_action.triggered.connect(lambda: self.apply_transform(
             self.compact_mode, "double", preserve_presentation=True, value_quote="double"
         ))
-        self.key_value_single_button.clicked.connect(lambda: self.apply_transform(
+        self.key_value_single_action.triggered.connect(lambda: self.apply_transform(
             self.compact_mode, "double", preserve_presentation=True, value_quote="single"
         ))
+        self.key_initial_upper_action.triggered.connect(
+            lambda: self.apply_key_initial_case(uppercase=True)
+        )
+        self.key_initial_lower_action.triggered.connect(
+            lambda: self.apply_key_initial_case(uppercase=False)
+        )
         self.wrap_button.toggled.connect(self.set_line_wrap_enabled)
         self.fold_button.clicked.connect(self.toggle_all_folds)
         self.paste_button.clicked.connect(self.paste)
@@ -2290,6 +2315,186 @@ class JsonWindow(QMainWindow):
             button.mapToGlobal(button.rect().bottomLeft()), message, button, button.rect(), 3500
         )
 
+    @staticmethod
+    def _remove_null_fields(value) -> int:
+        """Delete object fields whose value is null, keeping null array items intact."""
+        if isinstance(value, dict):
+            removed = 0
+            for key in list(value):
+                if value[key] is None:
+                    del value[key]
+                    removed += 1
+                else:
+                    removed += JsonWindow._remove_null_fields(value[key])
+            return removed
+        if isinstance(value, list):
+            return sum(JsonWindow._remove_null_fields(item) for item in value)
+        return 0
+
+    def remove_null_fields(self):
+        text = self.editor.toPlainText()
+        if not text.strip():
+            QMessageBox.warning(self, APP_NAME, self.tr("请先粘贴 JSON", "Paste JSON first"))
+            return
+        try:
+            value = (
+                self.current_value
+                if self.current_value is not None and text == self.rendered_text
+                else parse_json_like(text).value
+            )
+            removed = self._remove_null_fields(value)
+        except (JsonToolError, ValueError, RecursionError) as exc:
+            self._show_json_error(str(exc), text)
+            return
+
+        if removed:
+            output = render_json(
+                value,
+                compact=self.compact_mode,
+                key_style=self.key_style,
+                string_quote="double",
+            )
+            editor = self.editor
+            cursor = editor.textCursor()
+            vertical_scroll = editor.verticalScrollBar().value()
+            horizontal_scroll = editor.horizontalScrollBar().value()
+            self.current_value = value
+            self.rendered_text = output
+            editor.clear_bookmarks()
+            editor.setPlainText(output)
+            cursor.setPosition(min(cursor.position(), len(output)))
+            editor.setTextCursor(cursor)
+
+            def restore_scroll_position() -> None:
+                editor.verticalScrollBar().setValue(vertical_scroll)
+                editor.horizontalScrollBar().setValue(horizontal_scroll)
+
+            restore_scroll_position()
+            QTimer.singleShot(0, restore_scroll_position)
+            count, depth = value_stats(value)
+            self.editor.json_stats_state = "computed"
+            self.editor.json_stats_counts = (count, depth)
+            self.editor.json_stats_text = self._localized_editor_stats(self.editor)
+            self.stats_label.setText(self.editor.json_stats_text)
+            self.update_path()
+
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            self.tr(
+                "已移除 {count} 个 null 值字段",
+                "Removed {count} null-valued field(s)",
+                count=removed,
+            ),
+        )
+
+    @staticmethod
+    def _sort_object_keys(value, *, reverse: bool) -> None:
+        """Sort every object recursively using Python's Unicode code-point order."""
+        if isinstance(value, dict):
+            items = sorted(value.items(), key=lambda item: item[0], reverse=reverse)
+            for _, child in items:
+                JsonWindow._sort_object_keys(child, reverse=reverse)
+            value.clear()
+            value.update(items)
+        elif isinstance(value, list):
+            for item in value:
+                JsonWindow._sort_object_keys(item, reverse=reverse)
+
+    def sort_keys(self, *, reverse: bool):
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
+            return
+        try:
+            value = (
+                self.current_value
+                if self.current_value is not None and text == self.rendered_text
+                else parse_json_like(text).value
+            )
+            self._sort_object_keys(value, reverse=reverse)
+            output = render_json(
+                value,
+                compact=self.compact_mode,
+                key_style=self.key_style,
+                string_quote="double",
+            )
+        except (JsonToolError, ValueError, RecursionError) as exc:
+            self._show_json_error(str(exc), text)
+            return
+
+        editor = self.editor
+        cursor = editor.textCursor()
+        vertical_scroll = editor.verticalScrollBar().value()
+        horizontal_scroll = editor.horizontalScrollBar().value()
+        self.current_value = value
+        self.rendered_text = output
+        editor.clear_bookmarks()
+        editor.setPlainText(output)
+        cursor.setPosition(min(cursor.position(), len(output)))
+        editor.setTextCursor(cursor)
+
+        def restore_scroll_position() -> None:
+            editor.verticalScrollBar().setValue(vertical_scroll)
+            editor.horizontalScrollBar().setValue(horizontal_scroll)
+
+        restore_scroll_position()
+        QTimer.singleShot(0, restore_scroll_position)
+        count, depth = value_stats(value)
+        self.editor.json_stats_state = "computed"
+        self.editor.json_stats_counts = (count, depth)
+        self.editor.json_stats_text = self._localized_editor_stats(self.editor)
+        self.stats_label.setText(self.editor.json_stats_text)
+        self._flash(self.tr(
+            "已按 Key {order}排序",
+            "Keys sorted in {order} order",
+            order=self.tr("降序", "descending") if reverse else self.tr("升序", "ascending"),
+        ))
+        self.update_path()
+
+    def apply_key_initial_case(self, *, uppercase: bool):
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
+            return
+        try:
+            output, parsed, changed = rewrite_json_like_key_initials(text, uppercase=uppercase)
+        except (JsonToolError, ValueError) as exc:
+            self._show_json_error(str(exc), text)
+            return
+        if not changed:
+            self._flash(self.tr("没有可转换的 Key", "No keys needed changing"))
+            return
+
+        editor = self.editor
+        cursor = editor.textCursor()
+        vertical_scroll = editor.verticalScrollBar().value()
+        horizontal_scroll = editor.horizontalScrollBar().value()
+        self.current_value = parsed.value
+        self.rendered_text = output
+        editor.clear_bookmarks()
+        editor.setPlainText(output)
+        cursor.setPosition(min(cursor.position(), len(output)))
+        editor.setTextCursor(cursor)
+
+        def restore_scroll_position() -> None:
+            editor.verticalScrollBar().setValue(vertical_scroll)
+            editor.horizontalScrollBar().setValue(horizontal_scroll)
+
+        restore_scroll_position()
+        QTimer.singleShot(0, restore_scroll_position)
+        count, depth = value_stats(parsed.value)
+        self.editor.json_stats_state = "computed"
+        self.editor.json_stats_counts = (count, depth)
+        self.editor.json_stats_text = self._localized_editor_stats(self.editor)
+        self.stats_label.setText(self.editor.json_stats_text)
+        self._flash(self.tr(
+            "已转换 {count} 个 Key 的首字母",
+            "Changed the initial letter of {count} key(s)",
+            count=changed,
+        ))
+        self.update_path()
+
     def apply_transform(
         self,
         compact: bool,
@@ -2590,11 +2795,27 @@ class JsonWindow(QMainWindow):
             "Format JSON / JSON5 while preserving comments, quotes, and number spelling",
         ))
         self.compact_button.setText(self.tr("压缩JSON", "Minify JSON"))
-        self.bare_button.setText(self.tr("key无引号", "Unquoted Keys"))
-        self.double_button.setText(self.tr("key双引号", "Double-Quoted Keys"))
-        self.single_button.setText(self.tr("key单引号", "Single-Quoted Keys"))
-        self.key_value_double_button.setText(self.tr("value双引号", "Double-Quoted Values"))
-        self.key_value_single_button.setText(self.tr("value单引号", "Single-Quoted Values"))
+        self.remove_null_button.setText(self.tr("移除null值", "Remove Null Fields"))
+        self.remove_null_button.setToolTip(self.tr(
+            "移除所有对象中值为 null 的字段",
+            "Remove fields whose value is null from all objects",
+        ))
+        self.sort_menu_button.setText(self.tr("排序操作", "Sort Actions"))
+        self.sort_menu_button.setToolTip(self.tr(
+            "按 Unicode 字典顺序排序对象的 Key",
+            "Sort object keys by Unicode dictionary order",
+        ))
+        self.sort_keys_ascending_action.setText(self.tr("按key升序", "Sort Keys Ascending"))
+        self.sort_keys_descending_action.setText(self.tr("按key降序", "Sort Keys Descending"))
+        self.key_value_menu_button.setText(self.tr("Key-Value 操作", "Key-Value Actions"))
+        self.key_value_menu_button.setToolTip(self.tr("转换 Key 和 Value 的引号样式", "Change key and value quote styles"))
+        self.bare_action.setText(self.tr("key无引号", "Unquoted Keys"))
+        self.double_action.setText(self.tr("key双引号", "Double-Quoted Keys"))
+        self.single_action.setText(self.tr("key单引号", "Single-Quoted Keys"))
+        self.key_value_double_action.setText(self.tr("value双引号", "Double-Quoted Values"))
+        self.key_value_single_action.setText(self.tr("value单引号", "Single-Quoted Values"))
+        self.key_initial_upper_action.setText(self.tr("key首字母大写", "Uppercase Key Initials"))
+        self.key_initial_lower_action.setText(self.tr("key首字母小写", "Lowercase Key Initials"))
         self.copy_postman_button.setText(self.tr("拷贝Postman JSON", "Copy Postman JSON"))
         self.copy_postman_button.setToolTip(self.tr(
             "拷贝可作为Postman参数的json,会进行规整化,如去掉json5之类的注释等",

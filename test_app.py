@@ -223,6 +223,8 @@ class LanguageUiTests(unittest.TestCase):
         self.window.apply_language("en")
         self.assertEqual(self.window.compact_button.text(), "Minify JSON")
         self.assertEqual(self.window.copy_postman_button.text(), "Copy Postman JSON")
+        self.assertEqual(self.window.remove_null_button.text(), "Remove Null Fields")
+        self.assertEqual(self.window.sort_menu_button.text(), "Sort Actions")
         self.assertIn("removing JSON5 comments", self.window.copy_postman_button.toolTip())
         self.assertIn("preserving comments", self.window.format_button.toolTip())
         self.assertEqual(self.window.wrap_button.text(), "Wrap")
@@ -268,13 +270,23 @@ class LanguageUiTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            toolbar_layout.indexOf(self.window.single_button) + 1,
-            toolbar_layout.indexOf(self.window.key_value_double_button),
+            toolbar_layout.indexOf(self.window.copy_postman_button) + 1,
+            toolbar_layout.indexOf(self.window.remove_null_button),
         )
         self.assertEqual(
-            toolbar_layout.indexOf(self.window.key_value_double_button) + 1,
-            toolbar_layout.indexOf(self.window.key_value_single_button),
+            toolbar_layout.indexOf(self.window.remove_null_button) + 1,
+            toolbar_layout.indexOf(self.window.sort_menu_button),
         )
+        self.assertEqual(
+            toolbar_layout.indexOf(self.window.sort_menu_button) + 1,
+            toolbar_layout.indexOf(self.window.key_value_menu_button),
+        )
+        self.assertEqual(self.window.sort_menu.actions()[0], self.window.sort_keys_ascending_action)
+        self.assertEqual(self.window.sort_menu.actions()[1], self.window.sort_keys_descending_action)
+        self.assertEqual(self.window.key_value_menu.actions()[4], self.window.key_value_double_action)
+        self.assertTrue(self.window.key_value_menu.actions()[6].isSeparator())
+        self.assertEqual(self.window.key_value_menu.actions()[7], self.window.key_initial_upper_action)
+        self.assertEqual(self.window.key_value_menu.actions()[8], self.window.key_initial_lower_action)
 
         self.window.wrap_button.click()
         self.assertFalse(self.window.settings.value("line_wrap", True, type=bool))
@@ -329,8 +341,8 @@ class LanguageUiTests(unittest.TestCase):
         self.window.editor.setPlainText(source)
         layout = self.window.copy_postman_button.parentWidget().layout()
         self.assertEqual(
-            layout.indexOf(self.window.copy_postman_button),
-            layout.indexOf(self.window.key_value_single_button) + 1,
+            layout.indexOf(self.window.copy_postman_button) + 1,
+            layout.indexOf(self.window.remove_null_button),
         )
         with patch.object(self.window, "_confirm_json5_minify") as confirm, \
                 patch("app.QMessageBox.warning") as warning, \
@@ -343,10 +355,55 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(self.window.editor.toPlainText(), source)
         self.assertEqual(self.window.hint.text(), "已放进剪切板")
 
+    def test_remove_null_fields_removes_object_fields_and_reports_count(self):
+        self.window.editor.setPlainText(
+            '{"remove":null,"keep":1,"nested":{"remove":null,"keep":2},'
+            '"items":[null,{"remove":null,"keep":3}]}'
+        )
+
+        with patch("app.QMessageBox.information") as information:
+            self.window.remove_null_button.click()
+
+        self.assertEqual(
+            json.loads(self.window.editor.toPlainText()),
+            {"keep": 1, "nested": {"keep": 2}, "items": [None, {"keep": 3}]},
+        )
+        information.assert_called_once()
+        self.assertEqual(information.call_args.args[2], "已移除 3 个 null 值字段")
+
+    def test_remove_null_fields_reports_zero_without_changing_content(self):
+        source = '{"keep": [null, {"name": "Alice"}]}'
+        self.window.editor.setPlainText(source)
+        self.window.apply_language("en")
+
+        with patch("app.QMessageBox.information") as information:
+            self.window.remove_null_button.click()
+
+        self.assertEqual(self.window.editor.toPlainText(), source)
+        information.assert_called_once()
+        self.assertEqual(information.call_args.args[2], "Removed 0 null-valued field(s)")
+
+    def test_sort_actions_sort_all_objects_by_unicode_key_order(self):
+        self.window.editor.setPlainText(
+            '{"z":1,"中文":2,"a":3,"A":4,"nested":{"z":1,"a":2},'
+            '"items":[{"b":1,"a":2}]}'
+        )
+
+        self.window.sort_keys_ascending_action.trigger()
+        ascending = json.loads(self.window.editor.toPlainText())
+        self.assertEqual(list(ascending), ["A", "a", "items", "nested", "z", "中文"])
+        self.assertEqual(list(ascending["nested"]), ["a", "z"])
+        self.assertEqual(list(ascending["items"][0]), ["a", "b"])
+
+        self.window.sort_keys_descending_action.trigger()
+        descending = json.loads(self.window.editor.toPlainText())
+        self.assertEqual(list(descending), ["中文", "z", "nested", "items", "a", "A"])
+        self.assertEqual(list(descending["nested"]), ["z", "a"])
+
     def test_copy_postman_after_quote_rewrite_and_in_english(self):
         self.window.apply_language("en")
         self.window.editor.setPlainText('{"name":"Alice"}')
-        self.window.key_value_single_button.click()
+        self.window.key_value_single_action.trigger()
         with patch("app.QToolTip.showText") as toast:
             self.window.copy_postman_button.click()
         self.assertEqual(QApplication.clipboard().text(), '{"name":"Alice"}')
@@ -381,7 +438,7 @@ class LanguageUiTests(unittest.TestCase):
 
     def test_minify_confirms_after_json5_quote_rewrite(self):
         self.window.editor.setPlainText("{\n// note\nname:'Alice',\n}")
-        self.window.key_value_double_button.click()
+        self.window.key_value_double_action.trigger()
         rewritten = self.window.editor.toPlainText()
         self.assertIn("// note", rewritten)
         self.assertIn('name:"Alice"', rewritten)
@@ -404,17 +461,26 @@ class LanguageUiTests(unittest.TestCase):
     def test_quote_buttons_rewrite_only_requested_tokens_without_reformatting(self):
         self.window.editor.setPlainText("{ name: 'Alice', city : 'Taipei', count: 2, }")
 
-        self.window.key_value_double_button.click()
+        self.window.key_value_double_action.trigger()
         self.assertEqual(
             self.window.editor.toPlainText(),
             '{ name: "Alice", city : "Taipei", count: 2, }',
         )
 
-        self.window.double_button.click()
+        self.window.double_action.trigger()
         self.assertEqual(
             self.window.editor.toPlainText(),
             '{ "name": "Alice", "city" : "Taipei", "count": 2, }',
         )
+
+    def test_key_initial_actions_preserve_non_english_keys(self):
+        self.window.editor.setPlainText("{ firstName: 1, 'LastName': 2, 中文: 3 }")
+
+        self.window.key_initial_upper_action.trigger()
+        self.assertEqual(self.window.editor.toPlainText(), "{ FirstName: 1, 'LastName': 2, 中文: 3 }")
+
+        self.window.key_initial_lower_action.trigger()
+        self.assertEqual(self.window.editor.toPlainText(), "{ firstName: 1, 'lastName': 2, 中文: 3 }")
 
     def test_transform_preserves_editor_scroll_position(self):
         editor = self.window.editor

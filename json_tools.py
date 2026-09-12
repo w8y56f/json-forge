@@ -580,6 +580,56 @@ def rewrite_json_like_quotes(
     return text[:parsed.start] + source + text[parsed.end:], parsed, escaped_value_count
 
 
+def rewrite_json_like_key_initials(
+    text: str,
+    *,
+    uppercase: bool,
+    parsed: ParsedJsonLike | None = None,
+) -> tuple[str, ParsedJsonLike, int]:
+    """Change the first ASCII letter of each JSON-like object key only.
+
+    Keys beginning with non-English characters (including JSON5 identifiers)
+    deliberately remain untouched. The tokenizer lets every other piece of
+    source formatting, including comments and value literals, pass through.
+    """
+    parsed = parsed or parse_json_like(text)
+    tokens = _json5_tokens(text[parsed.start:parsed.end])
+    converted: list[_Json5Token] = []
+    changed = 0
+    for index, token in enumerate(tokens):
+        is_key = (
+            token.kind in ("string", "atom")
+            and next(
+                (
+                    candidate.raw == ":"
+                    for candidate in tokens[index + 1:]
+                    if candidate.kind not in ("line_comment", "block_comment")
+                ),
+                False,
+            )
+        )
+        if is_key:
+            key = (
+                _JsonLikeValueParser(token.raw, 0).parse_string()[0]
+                if token.kind == "string" else token.raw
+            )
+            first = key[:1]
+            if first.isascii() and first.isalpha():
+                replacement = first.upper() if uppercase else first.lower()
+                if replacement != first:
+                    changed += 1
+                    if token.kind == "atom":
+                        raw = replacement + token.raw[1:]
+                    elif len(token.raw) > 2 and token.raw[1] == first:
+                        raw = token.raw[0] + replacement + token.raw[2:]
+                    else:
+                        raw = _json_string(key[:1].replace(first, replacement) + key[1:], token.raw[0])
+                    token = _Json5Token(token.kind, raw, token.leading)
+        converted.append(token)
+    source = "".join(token.leading + token.raw for token in converted)
+    return text[:parsed.start] + source + text[parsed.end:], parsed, changed
+
+
 def _json_string(value: str, quote: str = '"') -> str:
     encoded = json.dumps(value, ensure_ascii=False)
     if quote == '"':
