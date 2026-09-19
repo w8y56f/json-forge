@@ -9,6 +9,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 
@@ -107,6 +108,8 @@ def main() -> int:
             [ditto, "-c", "-k", "--sequesterRsrc", "--keepParent", str(app_path), str(archive_path)],
             cwd=root,
         )
+        with zipfile.ZipFile(archive_path, "a", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+            archive.write(root / "Reference Book.md", "Reference Book.md")
         unzip = shutil.which("unzip")
         if unzip:
             run([unzip, "-tq", str(archive_path)], cwd=root)

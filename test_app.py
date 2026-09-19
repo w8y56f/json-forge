@@ -262,6 +262,10 @@ class LanguageUiTests(unittest.TestCase):
         toolbar_layout = self.window.wrap_button.parentWidget().layout()
         self.assertEqual(
             toolbar_layout.indexOf(self.window.wrap_button) + 1,
+            toolbar_layout.indexOf(self.window.selection_highlight_button),
+        )
+        self.assertEqual(
+            toolbar_layout.indexOf(self.window.selection_highlight_button) + 1,
             toolbar_layout.indexOf(self.window.fold_button),
         )
         self.assertTrue(self.window.wrap_button.isChecked())
@@ -822,6 +826,26 @@ class FindSelectionTests(unittest.TestCase):
             self.window.selection_button.setChecked(True)
             warning.assert_called_once()
         self.assertFalse(self.window.selection_button.isChecked())
+
+    def test_selection_highlight_matches_selection_with_configured_rules(self):
+        editor = self.window.editor
+        editor.setPlainText("Name name names")
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(4, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+
+        self.window.selection_highlight_button.setChecked(True)
+        self.assertEqual(len(editor.selection_highlight_extra_selections), 3)
+
+        self.window.selection_highlight_word_action.setChecked(True)
+        self.assertEqual(len(editor.selection_highlight_extra_selections), 2)
+
+        self.window.selection_highlight_case_action.setChecked(True)
+        self.assertEqual(len(editor.selection_highlight_extra_selections), 1)
+
+        self.window.selection_highlight_button.setChecked(False)
+        self.assertEqual(editor.selection_highlight_extra_selections, [])
 
 
 class BookmarkTests(unittest.TestCase):

@@ -71,6 +71,7 @@ SOURCE_FILES = (
     "version_info.py",
     "requirements.txt",
     "README.md",
+    "Reference Book.md",
     "start.sh",
     "start.bat",
     "assets/JSON-Forge.png",

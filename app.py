@@ -15,7 +15,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
     QPixmap, QPolygon, QShortcut, QTextBlockUserData, QTextCharFormat, QTextCursor,
-    QSyntaxHighlighter,
+    QTextDocument, QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
@@ -576,6 +576,7 @@ class JsonEditor(QPlainTextEdit):
         self.highlighted_brace_positions: set[int] = set()
         self.brace_extra_selections: list[QTextEdit.ExtraSelection] = []
         self.search_extra_selections: list[QTextEdit.ExtraSelection] = []
+        self.selection_highlight_extra_selections: list[QTextEdit.ExtraSelection] = []
         self.gutter = EditorGutter(self)
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter_area)
@@ -897,10 +898,18 @@ class JsonEditor(QPlainTextEdit):
         self.search_extra_selections = selections
         self._apply_decorations()
 
+    def set_selection_highlight_extra_selections(self, selections: list[QTextEdit.ExtraSelection]):
+        self.selection_highlight_extra_selections = selections
+        self._apply_decorations()
+
     def _apply_decorations(self):
         # Brace selections come last so their foreground remains red even
         # when the same character is also part of a search result.
-        self.setExtraSelections(self.search_extra_selections + self.brace_extra_selections)
+        self.setExtraSelections(
+            self.search_extra_selections
+            + self.selection_highlight_extra_selections
+            + self.brace_extra_selections
+        )
 
     def _paired_bracket_at(self, position: int) -> int | None:
         # Read through QTextCursor instead of indexing the Python string:
@@ -1074,6 +1083,21 @@ class JsonWindow(QMainWindow):
         self._session_save_timer.setInterval(700)
         self._session_save_timer.timeout.connect(self._save_session_if_dirty)
         self.settings = create_app_settings()
+        self.selection_highlight_enabled = setting_as_bool(
+            self.settings,
+            "selection_highlight_enabled",
+            default_setting("selection_highlight_enabled", False),
+        )
+        self.selection_highlight_case_sensitive = setting_as_bool(
+            self.settings,
+            "selection_highlight_case_sensitive",
+            default_setting("selection_highlight_case_sensitive", False),
+        )
+        self.selection_highlight_whole_word = setting_as_bool(
+            self.settings,
+            "selection_highlight_whole_word",
+            default_setting("selection_highlight_whole_word", False),
+        )
         self.theme = self.settings.value("theme", default_setting("theme", "light"))
         if self.theme not in ("light", "dark"):
             self.theme = "light"
@@ -1452,6 +1476,18 @@ class JsonWindow(QMainWindow):
         self.wrap_button = self._button("换行")
         self.wrap_button.setCheckable(True)
         self.wrap_button.setChecked(self.line_wrap_enabled)
+        self.selection_highlight_button = QToolButton()
+        self.selection_highlight_button.setCheckable(True)
+        self.selection_highlight_button.setChecked(self.selection_highlight_enabled)
+        self.selection_highlight_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.selection_highlight_menu = QMenu(self.selection_highlight_button)
+        self.selection_highlight_case_action = self.selection_highlight_menu.addAction("")
+        self.selection_highlight_case_action.setCheckable(True)
+        self.selection_highlight_case_action.setChecked(self.selection_highlight_case_sensitive)
+        self.selection_highlight_word_action = self.selection_highlight_menu.addAction("")
+        self.selection_highlight_word_action.setCheckable(True)
+        self.selection_highlight_word_action.setChecked(self.selection_highlight_whole_word)
+        self.selection_highlight_button.setMenu(self.selection_highlight_menu)
         self.fold_button = self._button("折叠")
         self.fold_button.setEnabled(False)
         self.paste_button = self._button("从剪贴板粘贴")
@@ -1461,6 +1497,7 @@ class JsonWindow(QMainWindow):
             tools.addWidget(button)
         tools.addStretch()
         tools.addWidget(self.wrap_button)
+        tools.addWidget(self.selection_highlight_button)
         tools.addWidget(self.fold_button)
         tools.addWidget(self.paste_button)
         tools.addWidget(self.clear_button)
@@ -1629,6 +1666,9 @@ class JsonWindow(QMainWindow):
             lambda: self.apply_key_initial_case(uppercase=False)
         )
         self.wrap_button.toggled.connect(self.set_line_wrap_enabled)
+        self.selection_highlight_button.toggled.connect(self.set_selection_highlight_enabled)
+        self.selection_highlight_case_action.toggled.connect(self.set_selection_highlight_case_sensitive)
+        self.selection_highlight_word_action.toggled.connect(self.set_selection_highlight_whole_word)
         self.fold_button.clicked.connect(self.toggle_all_folds)
         self.focus_mode_button.toggled.connect(self.toggle_focus_mode)
         self.paste_button.clicked.connect(self.paste)
@@ -1793,6 +1833,7 @@ class JsonWindow(QMainWindow):
                 self.selection_button.setChecked(False)
                 self.selection_button.blockSignals(False)
                 self.perform_search()
+            self._update_selection_highlights()
             self._mark_session_dirty()
 
     def _fold_state_changed(self, editor: JsonEditor):
@@ -1829,6 +1870,61 @@ class JsonWindow(QMainWindow):
         )
         for index in range(self.editor_stack.count()):
             self.editor_stack.widget(index).setLineWrapMode(mode)
+
+    def set_selection_highlight_enabled(self, enabled: bool):
+        self.selection_highlight_enabled = bool(enabled)
+        self.settings.setValue("selection_highlight_enabled", self.selection_highlight_enabled)
+        if self.selection_highlight_enabled:
+            self._update_selection_highlights()
+            return
+        for index in range(self.editor_stack.count()):
+            self.editor_stack.widget(index).set_selection_highlight_extra_selections([])
+
+    def set_selection_highlight_case_sensitive(self, enabled: bool):
+        self.selection_highlight_case_sensitive = bool(enabled)
+        self.settings.setValue("selection_highlight_case_sensitive", self.selection_highlight_case_sensitive)
+        self._update_selection_highlights()
+
+    def set_selection_highlight_whole_word(self, enabled: bool):
+        self.selection_highlight_whole_word = bool(enabled)
+        self.settings.setValue("selection_highlight_whole_word", self.selection_highlight_whole_word)
+        self._update_selection_highlights()
+
+    def _update_selection_highlights(self):
+        """Highlight all current-tab matches for the active editor selection."""
+        editor = self.editor
+        if editor is None:
+            return
+        if not self.selection_highlight_enabled:
+            editor.set_selection_highlight_extra_selections([])
+            return
+        cursor = editor.textCursor()
+        query = cursor.selectedText().replace("\u2029", "\n")
+        if not cursor.hasSelection() or not query or not query.strip():
+            editor.set_selection_highlight_extra_selections([])
+            return
+
+        flags = QTextDocument.FindFlags()
+        if self.selection_highlight_case_sensitive:
+            flags |= QTextDocument.FindFlag.FindCaseSensitively
+        if self.selection_highlight_whole_word:
+            flags |= QTextDocument.FindFlag.FindWholeWords
+
+        selections: list[QTextEdit.ExtraSelection] = []
+        match = editor.document().find(query, 0, flags)
+        color = "#86EFAC" if self.theme == "light" else "#166534"
+        foreground = QColor("#052E16" if self.theme == "light" else "#DCFCE7")
+        while not match.isNull():
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = match
+            selection.format.setBackground(QColor(color))
+            selection.format.setForeground(foreground)
+            selections.append(selection)
+            next_position = match.selectionEnd()
+            if next_position <= match.selectionStart():
+                break
+            match = editor.document().find(query, next_position, flags)
+        editor.set_selection_highlight_extra_selections(selections)
 
     def adjust_editor_font_size(self, adjustment: int):
         """Zoom all editor tabs and persist the selected point size."""
@@ -2025,6 +2121,35 @@ class JsonWindow(QMainWindow):
             )
             self.wrap_button.setChecked(line_wrap_enabled)
             self.set_line_wrap_enabled(line_wrap_enabled)
+            self.selection_highlight_button.blockSignals(True)
+            self.selection_highlight_case_action.blockSignals(True)
+            self.selection_highlight_word_action.blockSignals(True)
+            self.selection_highlight_button.setChecked(setting_as_bool(
+                self.settings,
+                "selection_highlight_enabled",
+                default_setting("selection_highlight_enabled", False),
+            ))
+            self.selection_highlight_case_action.setChecked(setting_as_bool(
+                self.settings,
+                "selection_highlight_case_sensitive",
+                default_setting("selection_highlight_case_sensitive", False),
+            ))
+            self.selection_highlight_word_action.setChecked(setting_as_bool(
+                self.settings,
+                "selection_highlight_whole_word",
+                default_setting("selection_highlight_whole_word", False),
+            ))
+            self.selection_highlight_button.blockSignals(False)
+            self.selection_highlight_case_action.blockSignals(False)
+            self.selection_highlight_word_action.blockSignals(False)
+            self.selection_highlight_enabled = self.selection_highlight_button.isChecked()
+            self.selection_highlight_case_sensitive = self.selection_highlight_case_action.isChecked()
+            self.selection_highlight_whole_word = self.selection_highlight_word_action.isChecked()
+            if self.selection_highlight_enabled:
+                self._update_selection_highlights()
+            else:
+                for index in range(self.editor_stack.count()):
+                    self.editor_stack.widget(index).set_selection_highlight_extra_selections([])
             theme = self.settings.value("theme", default_setting("theme", "light"))
             if theme not in ("light", "dark"):
                 theme = "light"
@@ -2723,6 +2848,7 @@ class JsonWindow(QMainWindow):
             self._update_bookmark_status()
             if self.search_bar.isVisible():
                 self.perform_search()
+            self._update_selection_highlights()
 
     def _editor_cursor_changed(self, editor: QPlainTextEdit):
         self._mark_session_dirty()
@@ -2731,6 +2857,8 @@ class JsonWindow(QMainWindow):
             self._update_bookmark_status()
 
     def _editor_selection_changed(self, editor: QPlainTextEdit):
+        if editor is self.editor and self.selection_highlight_enabled:
+            self._update_selection_highlights()
         if (
             editor is not self.editor
             or not self.search_bar.isVisible()
@@ -2864,6 +2992,13 @@ class JsonWindow(QMainWindow):
         ))
         self.wrap_button.setText(self.tr("换行", "Wrap"))
         self.wrap_button.setToolTip(self.tr("切换过长行是否自动换行", "Toggle wrapping for long lines"))
+        self.selection_highlight_button.setText(self.tr("选中高亮", "Selection Highlight"))
+        self.selection_highlight_button.setToolTip(self.tr(
+            "高亮当前标签页中与选区相同的文本；箭头可设置匹配规则",
+            "Highlight text matching the current selection in this tab; use the arrow to set match rules",
+        ))
+        self.selection_highlight_case_action.setText(self.tr("区分大小写", "Match Case"))
+        self.selection_highlight_word_action.setText(self.tr("完整单词", "Whole Word"))
         self._update_focus_mode_button()
         self.paste_button.setText(self.tr("从剪贴板粘贴", "Paste from Clipboard"))
         self.clear_button.setText(self.tr("清空", "Clear"))
@@ -2913,6 +3048,7 @@ class JsonWindow(QMainWindow):
                 editor.json_highlighter.set_theme(theme)
                 editor.set_editor_theme(theme)
                 editor.set_line_numbers_visible(show_line_numbers)
+            self._update_selection_highlights()
         if theme == "light":
             self.setStyleSheet("""
                 QMainWindow, QWidget { background: #F4F7FB; color: #1E293B; }
@@ -2945,7 +3081,7 @@ class JsonWindow(QMainWindow):
                 }
                 QPushButton:hover, QToolButton:hover { background: #E2E8F0; border-color: #94A3B8; }
                 QPushButton:pressed, QToolButton:pressed { background: #CCFBF1; }
-                QPushButton:checked { background: #CCFBF1; border-color: #0D9488; }
+                QPushButton:checked, QToolButton:checked { background: #CCFBF1; border-color: #0D9488; }
                 QPushButton[primary="true"] { background: #0D9488; color: white; border-color: #0F766E; }
                 QPushButton[primary="true"]:hover { background: #0F766E; }
                 QPlainTextEdit#editor {
@@ -3005,7 +3141,7 @@ class JsonWindow(QMainWindow):
             }
             QPushButton:hover, QToolButton:hover { background: #21314B; border-color: #3D5272; }
             QPushButton:pressed, QToolButton:pressed { background: #0F766E; }
-            QPushButton:checked { background: #0F766E; border-color: #2DD4BF; }
+            QPushButton:checked, QToolButton:checked { background: #0F766E; border-color: #2DD4BF; }
             QPushButton[primary="true"] { background: #0D9488; color: white; border-color: #14B8A6; }
             QPushButton[primary="true"]:hover { background: #0F766E; }
             QPlainTextEdit#editor {
