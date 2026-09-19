@@ -1,13 +1,13 @@
 ---
 name: json-forge-github-release
-description: Publish JSON Forge versions to the GitHub repository associated with the project, including a version tag, release notes, and all four release artifacts. Use when the user asks to publish or upload a JSON Forge GitHub Release; packaging alone does not request publishing.
+description: Publish JSON Forge versions to the GitHub repository associated with the project, including a version tag, release notes, four application packages, and the encrypted jf.sa distribution asset. Use when the user asks to publish or upload a JSON Forge GitHub Release; packaging alone does not request publishing.
 ---
 
 # JSON Forge GitHub Release
 
 Run from the JSON Forge repository root. This skill publishes releases; creating, editing, reviewing, or installing this skill does not authorize running its publication workflow. Honor requests to prepare only or create a draft only.
 
-A user request to publish a version authorizes creating and pushing its tag, creating the Release, and uploading its four packages. Once that authorization exists, finish without asking again for routine steps. Do not include unrelated commits or push unrelated branches.
+A user request to publish a version authorizes creating and pushing its tag, creating the Release, and uploading its five release assets. Once that authorization exists, finish without asking again for routine steps. Do not include unrelated commits or push unrelated branches.
 
 ## Establish the release inputs
 
@@ -26,19 +26,26 @@ The exact default asset list is:
 2. `dist/JSON-Forge-v{version}-macos-arm64.tar.gz`
 3. `dist/JSON-Forge-v{version}-windows-x86_64.zip`
 4. `dist/JSON-Forge-v{version}-windows-x86_64.exe`
+5. A locally prepared `jf.sa` containing the Windows ZIP.
 
 Use explicit paths. Never upload a broad `dist/*` glob, backups, other versions, expanded directories, or personal settings/session files.
 
 Use the project's `.agents/skills/json-forge-packager/SKILL.md` for building and artifact verification. Reuse packages when the current session establishes that they were built and verified from the selected unchanged release source. Filenames, modification times, and matching version strings alone do not establish that correspondence. If provenance is uncertain or an artifact is missing, rebuild all four from the selected commit using that skill; the EXE must embed that build's Windows ZIP. If its instructions are unavailable, report that prerequisite rather than inventing a replacement packaging workflow.
 
-Record each artifact's filename, byte size, and SHA-256 locally. Confirm all four packages passed the packager's checks before touching remote tags or releases. Keep any required build backups.
+Prepare `jf.sa` from the verified Windows ZIP before touching remote tags or releases:
+
+1. Require a working `7zz` executable. Create a fresh temporary staging directory outside the source tree and `dist`, then copy the Windows ZIP into a folder named exactly after the ZIP stem. Never move or modify the source ZIP.
+2. Create a 7z archive with header encryption and password `Abc*123`, then rename it `jf.sa`. For example, from the staging directory: `7zz a -t7z -mhe=on '-pAbc*123' payload.7z JSON-Forge-v{version}-windows-x86_64`; rename `payload.7z` to `jf.sa` afterward.
+3. Test `jf.sa` with the correct password and confirm a deliberately incorrect password fails. Extract it to a separate temporary location and verify it contains exactly the staging folder and original Windows ZIP, whose SHA-256 matches the source ZIP. Re-test the renamed `jf.sa` explicitly and keep it until the GitHub asset is verified.
+
+Record each artifact's filename, byte size, and SHA-256 locally. Confirm all four packages passed the packager's checks and `jf.sa` passed the encryption checks before touching remote tags or releases. Keep any required build backups.
 
 Write release notes to a temporary UTF-8 file outside the working tree. Default title: `JSON Forge v{version}`. Default notes language: Chinese, following the user's language unless requested otherwise. Include:
 
 - Concrete changes derived from the release diff, grouped into new behavior and fixes only when useful. Describe user-visible outcomes; do not invent changes from the version number.
-- A short download table explaining macOS Apple Silicon app ZIP, macOS portable TAR.GZ with `start.sh`, Windows x64 portable ZIP with `start.bat`, and Windows x64 self-extracting GUI EXE.
+- A short download table explaining macOS Apple Silicon app ZIP, macOS portable TAR.GZ with `start.sh`, Windows x64 portable ZIP with `start.bat`, Windows x64 self-extracting GUI EXE, and encrypted `jf.sa`.
 - The tests and artifact checks actually completed, including that Windows artifacts were structurally verified on macOS but not run on Windows when applicable.
-- SHA-256 values for the four attached packages.
+- SHA-256 values for all five attached assets.
 
 Use `--notes-file` for `gh release create` or `gh release edit`; preserve real newlines. Use structured arguments or proper shell quoting for titles and paths. Do not interpolate release prose into shell code.
 
@@ -46,9 +53,9 @@ Use `--notes-file` for `gh release create` or `gh release edit`; preserve real n
 
 1. Immediately before remote mutation, confirm the session requests publication and the recorded commit/artifact inputs remain unchanged. For prepare-only requests, return the prepared notes and artifact inventory without creating tags or releases. For explicit draft-only requests, retain the draft at the end.
 2. If the version tag is absent, create an annotated local tag at the recorded commit, then push only `refs/tags/<tag>` to the verified remote. If the local or remote tag exists at the same commit, reuse it and push only if missing remotely. If either tag points elsewhere, stop and report both SHAs; never move, delete, or force-push a tag automatically.
-3. Verify the remote tag resolves to the recorded commit before creating the Release. Use `gh release create <tag> --repo <repo> --verify-tag --draft --title <title> --notes-file <file>` for a new Release, so GitHub cannot select the default branch implicitly. Upload the four explicit files while the Release is still a draft.
+3. Verify the remote tag resolves to the recorded commit before creating the Release. Use `gh release create <tag> --repo <repo> --verify-tag --draft --title <title> --notes-file <file>` for a new Release, so GitHub cannot select the default branch implicitly. Upload the five explicit files while the Release is still a draft.
 4. For an existing Release, inspect its draft/published state, notes, and assets. Preserve existing descriptions unless this session requests updating them. For each matching asset name, compare size and SHA-256 with the local artifact using GitHub's asset digest, or download it to a temporary directory and hash it if no digest is available. Skip identical files and upload missing files. If the same name has different content, report the conflict instead of using `--clobber` or deleting anything. Never delete and recreate an existing published Release to work around immutability.
-5. Fetch the Release asset inventory and verify all four exact names, byte sizes, and hashes against the local manifest. Only after successful verification, publish a newly created or resumed draft using `gh release edit <tag> --repo <repo> --draft=false`, unless the user requested a draft. Keep prerelease/latest behavior consistent with the request; do not promote an older version to Latest automatically.
-6. Re-read the Release and remote tag. Confirm the requested publication state, tag commit, asset integrity, and download URLs. Return the Release URL, version tag, and the four uploaded or reused assets, noting any Windows execution limitation.
+5. Fetch the Release asset inventory and verify all five exact names, byte sizes, and hashes against the local manifest. Only after successful verification, publish a newly created or resumed draft using `gh release edit <tag> --repo <repo> --draft=false`, unless the user requested a draft. Keep prerelease/latest behavior consistent with the request; do not promote an older version to Latest automatically.
+6. Re-read the Release and remote tag. Confirm the requested publication state, tag commit, asset integrity, and download URLs. Return the Release URL, version tag, and the five uploaded or reused assets, noting any Windows execution limitation.
 
 If a network operation fails or times out, inspect remote state before retrying; a timeout may have followed a successful write. Resume missing steps rather than duplicating a Release or replacing completed assets. After two failed retries of the same operation, retain the tag/draft/uploaded assets, report precisely what succeeded and what remains, and stop. Do not publish an incomplete draft or automatically roll back remote data.
