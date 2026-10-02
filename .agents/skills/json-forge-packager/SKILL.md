@@ -9,6 +9,21 @@ Use the repository's existing packaging scripts. Do not recreate their behavior 
 
 Read and validate the repository-root `VERSION` before presenting output names or building. Treat its value without a leading `v` as `{version}`; use `v{version}` only for display labels, release names, and manifests. Never hardcode a release version in this skill.
 
+## Verify the source commit
+
+Before running tests or any build command, confirm the release source is fully committed:
+
+```bash
+git rev-parse --verify HEAD
+git status --porcelain --untracked-files=all
+git show HEAD:VERSION
+git rev-parse HEAD
+```
+
+`git status --porcelain --untracked-files=all` must produce no output. This covers staged changes, unstaged changes, and untracked files; ignored build artifacts do not make the source dirty. The version stored in `HEAD:VERSION` must equal the validated repository-root `VERSION`.
+
+If either check fails, stop before testing or building and report the exact dirty paths or version mismatch. Do not build an artifact that could contain code not represented by its commit ID, and do not commit changes unless the user has separately authorized a commit. Record the full `HEAD` SHA as the source commit for the build report. After all selected builds finish, confirm `HEAD` is still that recorded commit and the tracked source remains clean before reporting success.
+
 When a selected final artifact already exists at the same versioned path, the build script must preserve it by renaming it to `bak_YYYYMMDD_HHMMSS_<original-name>` before writing the replacement. Preserve the complete original filename and extension, report backup files, and do not remove them during normal cleanup. If a backup name already exists in the same second, use `bak_YYYYMMDD_HHMMSS_2_<original-name>`, then `_3`, and so on.
 
 ## Select outputs
