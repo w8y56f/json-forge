@@ -5,6 +5,7 @@ import platform
 import re
 import os
 import json
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -56,8 +57,20 @@ def application_icon_path() -> Path:
 
 
 def application_data_path(*parts: str) -> Path:
-    """Return the per-user writable data directory used by the macOS app."""
-    return Path.home() / "Library" / "Application Support" / APP_NAME / Path(*parts)
+    """Return the platform's per-user writable data directory."""
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    elif sys.platform == "win32":
+        root_value = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        root = Path(root_value) if root_value else Path.home() / "AppData" / "Roaming"
+    else:
+        root = Path.home() / ".local" / "share"
+    return root / APP_NAME / Path(*parts)
+
+
+def is_release_package() -> bool:
+    """Return whether this is a frozen app or a portable release bundle."""
+    return is_bundled_app() or (Path(__file__).resolve().parent / "runtime").is_dir()
 
 
 def settings_file_path() -> Path:
@@ -121,13 +134,59 @@ def reset_settings_to_defaults(settings: QSettings) -> bool:
 
 
 def session_file_path() -> Path:
-    """Return the portable last-session snapshot path."""
+    """Return the per-user last-session path and migrate a portable legacy copy."""
     override = os.environ.get("JSON_STUDIO_SESSION_PATH")
     if override:
         return Path(override).expanduser().resolve()
-    if is_bundled_app() and sys.platform == "darwin":
-        return application_data_path("cache", "session.json")
-    return Path(__file__).resolve().parent / "cache" / "session.json"
+    if not is_release_package():
+        return Path(__file__).resolve().parent / "cache" / "session.json"
+    destination = application_data_path("cache", "session.json")
+    legacy = Path(__file__).resolve().parent / "cache" / "session.json"
+    migrate_legacy_session_file(legacy, destination)
+    return destination
+
+
+def migrate_legacy_session_file(legacy: Path, destination: Path) -> bool:
+    """Move a legacy session to user data, preferring an existing destination.
+
+    The legacy file is removed only after a complete copy, or when a newer
+    destination already exists. A failed copy leaves the legacy file intact.
+    """
+    try:
+        if legacy.resolve() == destination.resolve() or not legacy.is_file():
+            return False
+        if destination.exists():
+            if not destination.is_file():
+                return False
+            legacy.unlink()
+            return True
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix=".session-migration-", suffix=".tmp",
+            dir=str(destination.parent), delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            with legacy.open("rb") as source:
+                shutil.copyfileobj(source, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        try:
+            # Atomic no-clobber install: if another process got there first,
+            # the already-installed public copy wins.
+            os.link(temporary_path, destination)
+        except FileExistsError:
+            pass
+        temporary_path.unlink(missing_ok=True)
+        legacy.unlink()
+        return True
+    except OSError:
+        try:
+            if "temporary_path" in locals():
+                temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 def instance_lock_path() -> Path:
@@ -135,7 +194,7 @@ def instance_lock_path() -> Path:
     override = os.environ.get("JSON_STUDIO_INSTANCE_LOCK_PATH")
     if override:
         return Path(override).expanduser().resolve()
-    if is_bundled_app() and sys.platform == "darwin":
+    if is_release_package():
         return application_data_path("cache", "json-forge.lock")
     return Path(__file__).resolve().parent / "cache" / "json-forge.lock"
 

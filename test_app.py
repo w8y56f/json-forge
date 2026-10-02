@@ -25,6 +25,7 @@ from app import (
     default_settings_file_path,
     default_settings_values,
     instance_lock_path,
+    migrate_legacy_session_file,
     platform_shortcut_hint,
     reset_settings_to_defaults,
     session_file_path,
@@ -56,6 +57,91 @@ class InstanceLockTests(unittest.TestCase):
                     os.environ.pop("JSON_STUDIO_INSTANCE_LOCK_PATH", None)
                 else:
                     os.environ["JSON_STUDIO_INSTANCE_LOCK_PATH"] = previous
+
+    def test_release_lock_uses_platform_user_data_directory(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "APPDATA": directory,
+                "LOCALAPPDATA": "",
+                "JSON_STUDIO_INSTANCE_LOCK_PATH": "",
+            },
+            clear=False,
+        ), patch("app.sys.platform", "win32"), patch("app.is_release_package", return_value=True):
+            self.assertEqual(
+                instance_lock_path(),
+                Path(directory) / APP_NAME / "cache" / "json-forge.lock",
+            )
+
+
+class SessionMigrationTests(unittest.TestCase):
+    def test_release_package_session_path_migrates_from_bundle_directory(self):
+        import app
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            (bundle / "runtime").mkdir(parents=True)
+            legacy = bundle / "cache" / "session.json"
+            legacy.parent.mkdir()
+            legacy.write_text("legacy-session", encoding="utf-8")
+            data_root = root / "roaming"
+            with patch.dict(
+                os.environ,
+                {
+                    "APPDATA": str(data_root),
+                    "JSON_STUDIO_SESSION_PATH": "",
+                },
+                clear=False,
+            ), patch("app.sys.platform", "win32"), patch(
+                "app.__file__", str(bundle / "app.py")
+            ):
+                self.assertEqual(
+                    session_file_path(),
+                    data_root / APP_NAME / "cache" / "session.json",
+                )
+            self.assertEqual(
+                (data_root / APP_NAME / "cache" / "session.json").read_text(
+                    encoding="utf-8"
+                ),
+                "legacy-session",
+            )
+            self.assertFalse(legacy.exists())
+
+    def test_legacy_session_is_copied_then_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "old" / "cache" / "session.json"
+            destination = root / "user" / "cache" / "session.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text('{"tabs": []}', encoding="utf-8")
+
+            self.assertTrue(migrate_legacy_session_file(legacy, destination))
+            self.assertEqual(destination.read_text(encoding="utf-8"), '{"tabs": []}')
+            self.assertFalse(legacy.exists())
+
+    def test_existing_user_session_wins_and_legacy_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "old-session.json"
+            destination = root / "user-session.json"
+            legacy.write_text("old", encoding="utf-8")
+            destination.write_text("new", encoding="utf-8")
+
+            self.assertTrue(migrate_legacy_session_file(legacy, destination))
+            self.assertEqual(destination.read_text(encoding="utf-8"), "new")
+            self.assertFalse(legacy.exists())
+
+    def test_failed_migration_keeps_legacy_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "old-session.json"
+            destination = root / "not-a-directory" / "session.json"
+            legacy.write_text("old", encoding="utf-8")
+            destination.parent.write_text("blocker", encoding="utf-8")
+
+            self.assertFalse(migrate_legacy_session_file(legacy, destination))
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "old")
 
 
 class SettingsStorageTests(unittest.TestCase):

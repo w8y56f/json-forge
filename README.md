@@ -29,7 +29,7 @@
 - 工具栏“换行”按钮可切换过长行是否自动换行，默认开启并保存到 `settings.ini`
 - 使用 `Cmd/Ctrl + 鼠标滚轮` 或 `Cmd/Ctrl + +`、`-`、`0` 可缩放、缩小或重置 JSON 编辑器字号
 - 支持按 Tab 独立设置行书签：点击行号区书签栏或使用 `Ctrl/Cmd + F2` 切换，`F2` / `Shift + F2` 循环跳转
-- 退出后自动恢复上次会话：Tab 内容、标题、当前 Tab、光标、滚动位置、折叠状态和书签保存在 `cache/session.json`
+- 退出后自动恢复上次会话：Tab 内容、标题、当前 Tab、光标、滚动位置、折叠状态和书签保存在用户数据目录；发布版升级时自动迁移旧会话
 - `Ctrl/Cmd + F` 浮动搜索，支持大小写、Whole Word、选区搜索、属性名/属性值范围和匹配导航
 - 光标位于 `{}`、`[]` 或 `()` 任一端时，以红色同步高亮对应符号，并忽略字符串内括号
 
@@ -69,8 +69,8 @@ uv pip install --python .venv/bin/python pyinstaller
 根目录 `VERSION`；解压后得到 `JSON Forge.app`。
 构建目录中的 `.app` 中间产物会在 ZIP 完整性验证后删除。应用内置 Python 和 PySide6，
 目标 Mac 无需安装 Python。未使用 Apple Developer ID 签名的本地构建采用 ad-hoc 签名；复制到其他 Mac
-后若被 Gatekeeper 阻止，可在 Finder 中右键应用并选择“打开”。打包版的设置与会话存放在
-`~/Library/Application Support/JSON Forge/`。
+后若被 Gatekeeper 阻止，可在 Finder 中右键应用并选择“打开”。发布版会话与单实例锁存放在
+`~/Library/Application Support/JSON Forge/cache/`。
 
 ### 便携目录
 
@@ -97,8 +97,8 @@ python packaging/build_release.py --target windows-x86_64
 ```
 
 产物名为 `dist/JSON-Forge-v<version>-windows-x86_64.exe`。它首次运行时会把内置运行环境解压至
-`%LOCALAPPDATA%\JSON Forge\runtime-v<version>`，用户设置和会话保存在
-`%APPDATA%\JSON Forge`。该本地构建没有商业代码签名，Windows SmartScreen 可能显示提示。
+`%LOCALAPPDATA%\JSON Forge\runtime-v<version>`，用户会话与单实例锁保存在
+`%APPDATA%\JSON Forge\cache`（不可用时回退到 `%LOCALAPPDATA%`）。该本地构建没有商业代码签名，Windows SmartScreen 可能显示提示。
 
 生成的目录和压缩包会放在 `dist/`，文件名中的 `v<version>` 自动读取根目录 `VERSION`（macOS 为 `.tar.gz`，Windows 为 `.zip`，可直接用资源管理器解压）。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
 
@@ -122,9 +122,9 @@ json-forge/
 ├── config/
 │   ├── settings.default.ini     # 可提交的默认配置，用于“恢复默认配置”
 │   └── settings.ini             # 用户当前配置，运行时生成，已加入 .gitignore
-├── cache/
-│   ├── session.json              # 上次会话内容、Tab、光标、书签等，运行时生成
-│   └── json-forge.lock           # 单实例锁文件，程序运行时生成
+├── cache/                        # 开发环境运行状态；发布版使用系统用户数据目录
+│   ├── session.json              # 开发环境上次会话，运行时生成
+│   └── json-forge.lock           # 开发环境单实例锁，程序运行时生成
 ├── packaging/
 │   └── build_release.py          # 生成自带 Python 和 PySide6 的发布包
 ├── start.sh                      # macOS 启动脚本；发布包优先使用内置 Python
@@ -137,9 +137,9 @@ json-forge/
 └── test_app.py                   # 界面和应用功能的自动化测试
 ```
 
-其中 `dist/` 和 `downloads/` 即使没有提交到 Git，也不要误认为是无用文件：前者是给别人使用的发布包，后者是重新打包时可以复用的下载缓存。`cache/` 和 `config/settings.ini` 则保存本机运行状态和个人设置，复制整个项目目录时可以一并迁移。
+其中 `dist/` 和 `downloads/` 即使没有提交到 Git，也不要误认为是无用文件：前者是给别人使用的发布包，后者是重新打包时可以复用的下载缓存。开发环境的 `cache/` 和 `config/settings.ini` 保存本机运行状态和个人设置。
 
-用户配置默认保存在程序目录下的 `config/settings.ini`，默认值集中在可提交的 `config/settings.default.ini`；会话快照保存在 `cache/session.json`。复制或迁移整个项目目录时会一并带走配置和上次会话。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。如果程序目录没有写权限，设置会自动回退到系统配置存储，会话文件则会在可写位置保存失败时保持原有文件不变。
+用户配置默认保存在程序目录下的 `config/settings.ini`，默认值集中在可提交的 `config/settings.default.ini`。开发运行时会话快照保存在项目 `cache/session.json`；发布版则使用 macOS 的 `~/Library/Application Support/JSON Forge/cache/` 或 Windows 的 `%APPDATA%\JSON Forge\cache`。首次运行新版时，若新位置没有会话文件，会从旧发布目录迁移；迁移完成后删除旧文件。若新旧位置均有文件，以新位置为准并删除旧副本；迁移失败时保留旧文件。会话内容和个人配置均已加入 `.gitignore`，不会提交到 Git。
 
 常用快捷键：`Ctrl/Cmd + Enter` 格式化，`Ctrl/Cmd + Shift + M` 紧凑压缩，
 `Ctrl/Cmd + T` 新建标签，`Ctrl/Cmd + W` 关闭当前标签。
