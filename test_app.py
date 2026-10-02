@@ -13,6 +13,9 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit
 
 from app import (
+    APP_NAME,
+    APP_VERSION,
+    COMMIT_ID,
     JsonEditor,
     JsonWindow,
     MoreSettingsDialog,
@@ -257,6 +260,14 @@ class LanguageUiTests(unittest.TestCase):
         self.assertIn("去掉json5", self.window.copy_postman_button.toolTip())
         self.assertEqual(self.window.wrap_button.text(), "换行")
         self.assertEqual(self.window.tab_bar.rename_hint, "双击标签标题可重命名")
+
+    def test_about_displays_short_commit_beside_version(self):
+        with patch("app.QMessageBox") as dialog_type:
+            self.window.show_about()
+
+        dialog = dialog_type.return_value
+        dialog.setText.assert_called_once_with(f"{APP_NAME} {APP_VERSION} ({COMMIT_ID})")
+        dialog.exec.assert_called_once()
 
     def test_line_wrap_button_precedes_fold_and_persists_for_all_tabs(self):
         toolbar_layout = self.window.wrap_button.parentWidget().layout()

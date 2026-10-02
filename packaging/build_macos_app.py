@@ -9,6 +9,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -18,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from release_utils import backup_existing  # noqa: E402
-from version_info import VERSION  # noqa: E402
+from version_info import COMMIT_ID, VERSION  # noqa: E402
 
 
 APP_NAME = "JSON Forge"
@@ -58,33 +59,37 @@ def main() -> int:
         )
         return 1
 
-    command = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--noconfirm",
-        "--windowed",
-        "--name",
-        APP_NAME,
-        "--osx-bundle-identifier",
-        BUNDLE_ID,
-        "--target-architecture",
-        architecture,
-        "--icon",
-        "assets/JSON-Forge.icns",
-        "--add-data",
-        "config/settings.default.ini:config",
-        "--add-data",
-        "VERSION:.",
-        "--add-data",
-        "assets/JSON-Forge.png:assets",
-        "app.py",
-    ]
-    if args.clean:
-        command.insert(4, "--clean")
-
     try:
-        run(command, cwd=root)
+        with tempfile.TemporaryDirectory(prefix="json-forge-build-info-") as temporary_name:
+            commit_path = Path(temporary_name) / "BUILD_COMMIT"
+            commit_path.write_text(COMMIT_ID + "\n", encoding="utf-8")
+            command = [
+                sys.executable,
+                "-m",
+                "PyInstaller",
+                "--noconfirm",
+                "--windowed",
+                "--name",
+                APP_NAME,
+                "--osx-bundle-identifier",
+                BUNDLE_ID,
+                "--target-architecture",
+                architecture,
+                "--icon",
+                "assets/JSON-Forge.icns",
+                "--add-data",
+                "config/settings.default.ini:config",
+                "--add-data",
+                "VERSION:.",
+                "--add-data",
+                f"{commit_path}:.",
+                "--add-data",
+                "assets/JSON-Forge.png:assets",
+                "app.py",
+            ]
+            if args.clean:
+                command.insert(4, "--clean")
+            run(command, cwd=root)
         app_path = root / "dist" / f"{APP_NAME}.app"
         if not app_path.is_dir():
             raise RuntimeError(f"PyInstaller did not create {app_path}")

@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from release_utils import backup_existing  # noqa: E402
-from version_info import DISPLAY_VERSION  # noqa: E402
+from version_info import COMMIT_ID, DISPLAY_VERSION  # noqa: E402
 
 
 APP_NAME = "JSON-Forge"
@@ -227,6 +227,7 @@ def build(target: str, output_root: Path, runtime_url: str | None = None) -> Pat
         destination = bundle / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / relative, destination)
+    (bundle / "BUILD_COMMIT").write_text(COMMIT_ID + "\n", encoding="utf-8")
     (bundle / "config").mkdir()
     shutil.copy2(root / "config" / "settings.default.ini", bundle / "config" / "settings.default.ini")
     (bundle / "cache").mkdir()
@@ -236,6 +237,7 @@ def build(target: str, output_root: Path, runtime_url: str | None = None) -> Pat
     manifest = {
         "application": APP_NAME,
         "version": DISPLAY_VERSION,
+        "commit": COMMIT_ID,
         "target": target,
         "python": PYTHON_LINE,
         "runtime_release": release.get("tag_name"),

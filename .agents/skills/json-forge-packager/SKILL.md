@@ -71,8 +71,8 @@ Option 4 embeds the Windows ZIP. When option 4 is requested without option 3, re
 
 Verify every selected output before cleanup:
 
-- macOS app ZIP: extract it to a temporary directory with `ditto -x -k`, confirm the main executable is Mach-O arm64, bundled `VERSION` equals the repository version, Info.plist reports `{version}`, `settings.default.ini` exists under `Contents/Resources/config`, `codesign --verify --deep --strict` succeeds, and perform a short launch smoke test with settings/session/lock paths redirected to a temporary directory. Confirm `dist/JSON Forge.app` was removed after ZIP creation.
-- Portable archives: list the archive and confirm it contains `VERSION`, `version_info.py`, `app.py`, `json_tools.py`, `config/settings.default.ini`, the matching start script, and the bundled Python executable. Confirm `runtime-manifest.json` reports `v{version}`.
+- macOS app ZIP: extract it to a temporary directory with `ditto -x -k`, confirm the main executable is Mach-O arm64, bundled `VERSION` equals the repository version, bundled `BUILD_COMMIT` equals the first seven characters of the recorded source commit, Info.plist reports `{version}`, `settings.default.ini` exists under `Contents/Resources/config`, `codesign --verify --deep --strict` succeeds, and perform a short launch smoke test with settings/session/lock paths redirected to a temporary directory. Confirm `dist/JSON Forge.app` was removed after ZIP creation.
+- Portable archives: list the archive and confirm it contains `VERSION`, `BUILD_COMMIT`, `version_info.py`, `app.py`, `json_tools.py`, `config/settings.default.ini`, the matching start script, and the bundled Python executable. Confirm `runtime-manifest.json` reports `v{version}` and the first seven characters of the recorded source commit.
 - Windows EXE: use `file` to confirm `PE32+ executable (GUI) x86-64` and report its SHA-256.
 - Rebuilds: confirm every pre-existing selected artifact has a timestamped backup and every canonical output path contains the newly built artifact.
 

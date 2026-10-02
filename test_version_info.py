@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from app import APP_VERSION
-from version_info import DISPLAY_VERSION, VERSION, read_version, version_file_path
+from version_info import COMMIT_ID, DISPLAY_VERSION, VERSION, read_commit_id, read_version, version_file_path
 
 
 class VersionInfoTests(unittest.TestCase):
@@ -12,6 +12,15 @@ class VersionInfoTests(unittest.TestCase):
         self.assertEqual(VERSION, version_file_path().read_text(encoding="utf-8").strip())
         self.assertEqual(DISPLAY_VERSION, f"v{VERSION}")
         self.assertEqual(APP_VERSION, DISPLAY_VERSION)
+        self.assertRegex(COMMIT_ID, r"^[0-9a-f]{7}$")
+
+    def test_build_commit_file_is_normalized_to_seven_characters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "BUILD_COMMIT"
+            path.write_text("A6D8DB58848BC2337A6554A2AAC709F650783B84\n", encoding="utf-8")
+            self.assertEqual(read_commit_id(path), "a6d8db5")
+            path.write_text("invalid\n", encoding="utf-8")
+            self.assertEqual(read_commit_id(path), "unknown")
 
     def test_read_version_accepts_three_part_semantic_version(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -47,6 +56,7 @@ class VersionInfoTests(unittest.TestCase):
         self.assertEqual(windows["OUTPUT_NAME"], f"JSON-Forge-v{VERSION}-windows-x86_64.exe")
         self.assertIn("assets/JSON-Forge.png", portable["SOURCE_FILES"])
         self.assertIn("Reference Book.md", portable["SOURCE_FILES"])
+        self.assertRegex(portable["COMMIT_ID"], r"^[0-9a-f]{7}$")
         self.assertTrue((root / "assets" / "JSON-Forge.icns").is_file())
         self.assertTrue((root / "packaging" / "windows_launcher" / "icon_windows_amd64.syso").is_file())
 

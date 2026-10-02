@@ -29,7 +29,7 @@ from json_tools import (
     JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_key_initials, rewrite_json_like_quotes,
     rewrite_json_like_quote_escapes, searchable_spans, value_stats,
 )
-from version_info import DISPLAY_VERSION
+from version_info import COMMIT_ID, DISPLAY_VERSION
 
 
 APP_VERSION = DISPLAY_VERSION
@@ -2172,7 +2172,8 @@ class JsonWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle(self.tr(f"关于 {APP_NAME}", f"About {APP_NAME}"))
         box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"{APP_NAME} {APP_VERSION}")
+        build_label = f" ({COMMIT_ID})" if COMMIT_ID != "unknown" else ""
+        box.setText(f"{APP_NAME} {APP_VERSION}{build_label}")
         box.setInformativeText(self.tr(
             "基于Python的版本：{version}\n\n"
             "如果使用电脑环境中的 Python，请注意 Python 版本兼容性；"
