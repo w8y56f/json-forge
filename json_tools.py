@@ -580,6 +580,173 @@ def rewrite_json_like_quotes(
     return text[:parsed.start] + source + text[parsed.end:], parsed, escaped_value_count
 
 
+class _EscapedQuoteBoundaryParser:
+    """Locate quote delimiters even when their leading backslashes hide JSON syntax."""
+
+    def __init__(self, text: str, start: int):
+        self.text = text
+        self.pos = start
+        self.removed: set[int] = set()
+
+    def _skip_trivia(self, position: int) -> int:
+        while position < len(self.text):
+            if self.text[position].isspace():
+                position += 1
+            elif self.text.startswith("//", position):
+                newline = self.text.find("\n", position + 2)
+                position = len(self.text) if newline < 0 else newline + 1
+            elif self.text.startswith("/*", position):
+                closing = self.text.find("*/", position + 2)
+                if closing < 0:
+                    raise JsonToolError("块注释缺少结束符 */")
+                position = closing + 2
+            else:
+                break
+        return position
+
+    def _string(self, following: str) -> None:
+        start = self.pos
+        escaped_delimiters = self.text.startswith((r'\"', r"\'"), start)
+        quote = self.text[start + int(escaped_delimiters)]
+        self.pos += 1 + int(escaped_delimiters)
+        while self.pos < len(self.text):
+            if escaped_delimiters:
+                if self.text.startswith("\\" + quote, self.pos):
+                    next_pos = self._skip_trivia(self.pos + 2)
+                    if next_pos < len(self.text) and self.text[next_pos] in following:
+                        self.removed.update((start, self.pos))
+                        self.pos += 2
+                        return
+                if self.text[self.pos] == "\\" and self.pos + 1 < len(self.text):
+                    self.pos += 2
+                else:
+                    self.pos += 1
+            elif self.text[self.pos] == "\\":
+                self.pos += 2
+            elif self.text[self.pos] == quote:
+                self.pos += 1
+                return
+            else:
+                self.pos += 1
+        raise JsonToolError("字符串缺少结束引号")
+
+    def _value(self, following: str) -> None:
+        self.pos = self._skip_trivia(self.pos)
+        if self.pos >= len(self.text):
+            raise JsonToolError("缺少 JSON 值")
+        if self.text[self.pos] == "{":
+            self._object()
+        elif self.text[self.pos] == "[":
+            self._array()
+        elif self.text[self.pos] in "\"'" or self.text.startswith((r'\"', r"\'"), self.pos):
+            self._string(following)
+        else:
+            start = self.pos
+            while self.pos < len(self.text) and self.text[self.pos] not in following:
+                if self.text[self.pos].isspace() or self.text.startswith(("//", "/*"), self.pos):
+                    break
+                self.pos += 1
+            if self.pos == start:
+                raise JsonToolError(f"第 {self.pos + 1} 个字符附近不是有效的 JSON 值")
+
+    def _object(self) -> None:
+        self.pos += 1
+        while True:
+            self.pos = self._skip_trivia(self.pos)
+            if self.pos >= len(self.text):
+                raise JsonToolError("对象缺少结束大括号")
+            if self.text[self.pos] == "}":
+                self.pos += 1
+                return
+            if self.text[self.pos] in "\"'" or self.text.startswith((r'\"', r"\'"), self.pos):
+                self._string(":")
+            else:
+                identifier = _read_json5_identifier(self.text, self.pos)
+                if identifier is None:
+                    raise JsonToolError(f"第 {self.pos + 1} 个字符附近不是有效的属性名")
+                self.pos = identifier[1]
+            self.pos = self._skip_trivia(self.pos)
+            if self.pos >= len(self.text) or self.text[self.pos] != ":":
+                raise JsonToolError(f"第 {self.pos + 1} 个字符附近缺少 :")
+            self.pos += 1
+            self._value(",}")
+            self.pos = self._skip_trivia(self.pos)
+            if self.pos < len(self.text) and self.text[self.pos] == ",":
+                self.pos += 1
+            elif self.pos < len(self.text) and self.text[self.pos] == "}":
+                self.pos += 1
+                return
+            else:
+                raise JsonToolError(f"第 {self.pos + 1} 个字符附近缺少逗号或结束大括号")
+
+    def _array(self) -> None:
+        self.pos += 1
+        while True:
+            self.pos = self._skip_trivia(self.pos)
+            if self.pos >= len(self.text):
+                raise JsonToolError("数组缺少结束方括号")
+            if self.text[self.pos] == "]":
+                self.pos += 1
+                return
+            self._value(",]")
+            self.pos = self._skip_trivia(self.pos)
+            if self.pos < len(self.text) and self.text[self.pos] == ",":
+                self.pos += 1
+            elif self.pos < len(self.text) and self.text[self.pos] == "]":
+                self.pos += 1
+                return
+            else:
+                raise JsonToolError(f"第 {self.pos + 1} 个字符附近缺少逗号或结束方括号")
+
+    def normalize(self) -> tuple[str, int]:
+        self._value("")
+        return "".join(char for index, char in enumerate(self.text) if index not in self.removed), len(self.removed) // 2
+
+
+def rewrite_json_like_quote_escapes(
+    text: str,
+    *,
+    target_quote: StringQuote | None = None,
+) -> tuple[str, ParsedJsonLike]:
+    """Remove escaped string delimiters or emit all keys/string values with escaped target delimiters.
+
+    Internal escapes and non-string tokens are preserved when removing escapes.
+    """
+    normalized = None
+    parsed = None
+    last_error: JsonToolError | None = None
+    for start in _outer_starts(text):
+        try:
+            candidate, _ = _EscapedQuoteBoundaryParser(text, start).normalize()
+            candidate_parsed = parse_json_like(candidate)
+            if candidate_parsed.start == start:
+                normalized, parsed = candidate, candidate_parsed
+                break
+        except JsonToolError as exc:
+            last_error = exc
+    if normalized is None or parsed is None:
+        raise last_error or JsonToolError("没有找到完整、有效的 JSON 对象或数组")
+    if target_quote is None:
+        return normalized, parsed
+
+    converted, _, _ = rewrite_json_like_quotes(
+        normalized, key_style=target_quote, value_quote=target_quote, parsed=parsed,
+    )
+    converted_parsed = parse_json_like(converted)
+    tokens = _json5_tokens(converted[converted_parsed.start:converted_parsed.end])
+    escaped_source = "".join(
+        token.leading + (
+            "\\" + token.raw[0] + token.raw[1:-1] + "\\" + token.raw[-1]
+            if token.kind == "string" else token.raw
+        )
+        for token in tokens
+    )
+    return (
+        converted[:converted_parsed.start] + escaped_source + converted[converted_parsed.end:],
+        converted_parsed,
+    )
+
+
 def rewrite_json_like_key_initials(
     text: str,
     *,

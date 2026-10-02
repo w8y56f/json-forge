@@ -2,7 +2,7 @@ import unittest
 
 from json_tools import (
     JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json,
-    rewrite_json_like_key_initials, rewrite_json_like_quotes, transform,
+    rewrite_json_like_key_initials, rewrite_json_like_quote_escapes, rewrite_json_like_quotes, transform,
     searchable_spans, value_stats,
 )
 
@@ -54,6 +54,51 @@ class JsonToolsTest(unittest.TestCase):
         self.assertEqual(escaped, 1)
         self.assertIn("note: 'He said \\'hi\\''", output)
         self.assertIn("other: 'plain'", output)
+
+    def test_remove_only_key_and_value_boundary_quote_escapes(self):
+        examples = (
+            (r'{\"name\":\"stone\"}', '{"name":"stone"}'),
+            (r"{\'name\':\'stone\'}", "{'name':'stone'}"),
+            (r"{\'name\':\"stone\"}", "{'name':\"stone\"}"),
+            (r"{\"name\":\'stone\'}", "{\"name\":'stone'}"),
+            (r'{\"name\":\"sto\"ne\"}', r'{"name":"sto\"ne"}'),
+        )
+        for source, expected in examples:
+            with self.subTest(source=source):
+                output, parsed = rewrite_json_like_quote_escapes(source)
+                self.assertEqual(output, expected)
+                self.assertEqual(parsed.value["name"], "sto\"ne" if expected == r'{"name":"sto\"ne"}' else "stone")
+
+    def test_escape_quotes_converts_bare_keys_and_string_values_only(self):
+        source = "{ name: 'stone', /* keep */ count: 2, items: [\"hello\", true, null] }"
+        double, _ = rewrite_json_like_quote_escapes(source, target_quote="double")
+        self.assertEqual(
+            double,
+            r'{ \"name\": \"stone\", /* keep */ \"count\": 2, \"items\": [\"hello\", true, null] }',
+        )
+        single, _ = rewrite_json_like_quote_escapes(source, target_quote="single")
+        self.assertEqual(
+            single,
+            r"{ \'name\': \'stone\', /* keep */ \'count\': 2, \'items\': [\'hello\', true, null] }",
+        )
+        self.assertEqual(rewrite_json_like_quote_escapes(double, target_quote="double")[0], double)
+        self.assertEqual(rewrite_json_like_quote_escapes(single, target_quote="single")[0], single)
+        self.assertEqual(rewrite_json_like_quote_escapes(double)[0], '{ "name": "stone", /* keep */ "count": 2, "items": ["hello", true, null] }')
+
+    def test_escape_quotes_converts_other_quote_style_and_escapes_interior_target_quote(self):
+        source = '''{"name": "it's good", "note": 'say "hi"'}'''
+        single, _ = rewrite_json_like_quote_escapes(source, target_quote="single")
+        self.assertEqual(single, r'''{\'name\': \'it\'s good\', \'note\': \'say "hi"\'}''')
+        self.assertEqual(rewrite_json_like_quote_escapes(single)[0], r'''{'name': 'it\'s good', 'note': 'say "hi"'}''')
+
+    def test_quote_escape_rewrite_preserves_surrounding_text_and_rejects_broken_quotes(self):
+        source = r'INFO: {\"name\":\"stone\"} trailing'
+        self.assertEqual(
+            rewrite_json_like_quote_escapes(source)[0],
+            'INFO: {"name":"stone"} trailing',
+        )
+        with self.assertRaises(JsonToolError):
+            rewrite_json_like_quote_escapes(r'{\"name\":\"stone}')
 
     def test_key_initial_rewrite_changes_only_ascii_key_initials(self):
         source = "{ foo: 1, 'Bar': 2, 中文: 3, nested: { camelCase: 4 }, value: 'unchanged' }"

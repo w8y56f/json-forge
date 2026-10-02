@@ -294,6 +294,10 @@ class LanguageUiTests(unittest.TestCase):
         self.assertTrue(self.window.key_value_menu.actions()[6].isSeparator())
         self.assertEqual(self.window.key_value_menu.actions()[7], self.window.key_initial_upper_action)
         self.assertEqual(self.window.key_value_menu.actions()[8], self.window.key_initial_lower_action)
+        self.assertTrue(self.window.key_value_menu.actions()[9].isSeparator())
+        self.assertEqual(self.window.key_value_menu.actions()[10], self.window.remove_quote_escapes_action)
+        self.assertEqual(self.window.key_value_menu.actions()[11], self.window.escape_double_quotes_action)
+        self.assertEqual(self.window.key_value_menu.actions()[12], self.window.escape_single_quotes_action)
 
         self.window.wrap_button.click()
         self.assertFalse(self.window.settings.value("line_wrap", True, type=bool))
@@ -499,6 +503,23 @@ class LanguageUiTests(unittest.TestCase):
             self.window.editor.toPlainText(),
             '{ "name": "Alice", "city" : "Taipei", "count": 2, }',
         )
+
+    def test_quote_escape_menu_actions_round_trip_without_reformatting(self):
+        source = "{ name: 'stone', count: 2 }"
+        self.window.editor.setPlainText(source)
+
+        self.window.escape_double_quotes_action.trigger()
+        self.assertEqual(self.window.editor.toPlainText(), r'{ \"name\": \"stone\", \"count\": 2 }')
+        self.assertIsNone(self.window.current_value)
+
+        self.window.remove_quote_escapes_action.trigger()
+        self.assertEqual(self.window.editor.toPlainText(), '{ "name": "stone", "count": 2 }')
+        self.assertEqual(self.window.current_value, {"name": "stone", "count": 2})
+
+        self.window.escape_single_quotes_action.trigger()
+        self.assertEqual(self.window.editor.toPlainText(), r"{ \'name\': \'stone\', \'count\': 2 }")
+        self.window.escape_single_quotes_action.trigger()
+        self.assertEqual(self.window.editor.toPlainText(), r"{ \'name\': \'stone\', \'count\': 2 }")
 
     def test_key_initial_actions_preserve_non_english_keys(self):
         self.window.editor.setPlainText("{ firstName: 1, 'LastName': 2, 中文: 3 }")

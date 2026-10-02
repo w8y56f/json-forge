@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from json_tools import (
     JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_key_initials, rewrite_json_like_quotes,
-    searchable_spans, value_stats,
+    rewrite_json_like_quote_escapes, searchable_spans, value_stats,
 )
 from version_info import DISPLAY_VERSION
 
@@ -1472,6 +1472,10 @@ class JsonWindow(QMainWindow):
         self.key_value_menu.addSeparator()
         self.key_initial_upper_action = self.key_value_menu.addAction("key首字母大写")
         self.key_initial_lower_action = self.key_value_menu.addAction("key首字母小写")
+        self.key_value_menu.addSeparator()
+        self.remove_quote_escapes_action = self.key_value_menu.addAction("移除单/双引号转义")
+        self.escape_double_quotes_action = self.key_value_menu.addAction("key-value双引号转义")
+        self.escape_single_quotes_action = self.key_value_menu.addAction("key-value单引号转义")
         self.key_value_menu_button.setMenu(self.key_value_menu)
         self.wrap_button = self._button("换行")
         self.wrap_button.setCheckable(True)
@@ -1664,6 +1668,15 @@ class JsonWindow(QMainWindow):
         )
         self.key_initial_lower_action.triggered.connect(
             lambda: self.apply_key_initial_case(uppercase=False)
+        )
+        self.remove_quote_escapes_action.triggered.connect(
+            lambda: self.apply_quote_escapes(target_quote=None)
+        )
+        self.escape_double_quotes_action.triggered.connect(
+            lambda: self.apply_quote_escapes(target_quote="double")
+        )
+        self.escape_single_quotes_action.triggered.connect(
+            lambda: self.apply_quote_escapes(target_quote="single")
         )
         self.wrap_button.toggled.connect(self.set_line_wrap_enabled)
         self.selection_highlight_button.toggled.connect(self.set_selection_highlight_enabled)
@@ -2768,6 +2781,58 @@ class JsonWindow(QMainWindow):
         self._flash(message)
         self.update_path()
 
+    def apply_quote_escapes(self, *, target_quote: str | None) -> None:
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
+            return
+        try:
+            output, parsed = rewrite_json_like_quote_escapes(text, target_quote=target_quote)
+        except (JsonToolError, ValueError, RecursionError) as exc:
+            self._show_json_error(str(exc), text)
+            return
+        if output == text:
+            self._flash(self.tr("没有需要转换的引号", "No quotes needed changing"))
+            return
+
+        editor = self.editor
+        cursor = editor.textCursor()
+        vertical_scroll = editor.verticalScrollBar().value()
+        horizontal_scroll = editor.horizontalScrollBar().value()
+        # Escaped delimiters are intentionally not JSON syntax. Never cache them
+        # as a parsed rendering for later formatting or sorting operations.
+        self.current_value = parsed.value if target_quote is None else None
+        self.rendered_text = output if target_quote is None else None
+        editor.clear_bookmarks()
+        editor.setPlainText(output)
+        cursor.setPosition(min(cursor.position(), len(output)))
+        editor.setTextCursor(cursor)
+
+        def restore_scroll_position() -> None:
+            editor.verticalScrollBar().setValue(vertical_scroll)
+            editor.horizontalScrollBar().setValue(horizontal_scroll)
+
+        restore_scroll_position()
+        QTimer.singleShot(0, restore_scroll_position)
+        if target_quote is None:
+            count, depth = value_stats(parsed.value)
+            editor.json_stats_state = "computed"
+            editor.json_stats_counts = (count, depth)
+        else:
+            editor.json_stats_state = "modified"
+            editor.json_stats_counts = None
+        editor.json_stats_text = self._localized_editor_stats(editor)
+        self.stats_label.setText(editor.json_stats_text)
+        self._flash(
+            self.tr("已移除 key/value 引号转义", "Removed key/value quote escapes")
+            if target_quote is None else self.tr(
+                "已将 key/value 转为{quote}转义",
+                "Escaped keys and string values with {quote}",
+                quote=self.tr("双引号", "double quotes") if target_quote == "double" else self.tr("单引号", "single quotes"),
+            )
+        )
+        self.update_path()
+
     def _confirm_value_quote_change(self, count: int, value_quote: str) -> bool:
         quote_name = self.tr("单引号", "single quotes") if value_quote == "single" else self.tr("双引号", "double quotes")
         result = QMessageBox.question(
@@ -2984,6 +3049,9 @@ class JsonWindow(QMainWindow):
         self.key_value_single_action.setText(self.tr("value单引号", "Single-Quoted Values"))
         self.key_initial_upper_action.setText(self.tr("key首字母大写", "Uppercase Key Initials"))
         self.key_initial_lower_action.setText(self.tr("key首字母小写", "Lowercase Key Initials"))
+        self.remove_quote_escapes_action.setText(self.tr("移除单/双引号转义", "Remove Single/Double Quote Escapes"))
+        self.escape_double_quotes_action.setText(self.tr("key-value双引号转义", "Escape Keys/Values with Double Quotes"))
+        self.escape_single_quotes_action.setText(self.tr("key-value单引号转义", "Escape Keys/Values with Single Quotes"))
         self.copy_postman_button.setText(self.tr("拷贝Postman JSON", "Copy Postman JSON"))
         self.copy_postman_button.setToolTip(self.tr(
             "拷贝可作为Postman参数的json,会进行规整化,如去掉json5之类的注释等",
@@ -3097,6 +3165,7 @@ class JsonWindow(QMainWindow):
                 QMenu { background: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1; padding: 5px; }
                 QMenu::item { padding: 7px 24px; border-radius: 5px; }
                 QMenu::item:selected { background: #CCFBF1; }
+                QMenu::separator { height: 1px; background: #94A3B8; margin: 4px 10px; }
                 QScrollBar:vertical, QScrollBar:horizontal { background: #E2E8F0; }
                 QScrollBar:vertical { width: 13px; margin: 1px; }
                 QScrollBar:horizontal { height: 13px; margin: 1px; }
@@ -3156,6 +3225,7 @@ class JsonWindow(QMainWindow):
             QMenu { background: #111B2E; color: #DDE7F3; border: 1px solid #2B3A54; padding: 5px; }
             QMenu::item { padding: 7px 24px; border-radius: 5px; }
             QMenu::item:selected { background: #21314B; }
+            QMenu::separator { height: 1px; background: #3D5272; margin: 4px 10px; }
             QScrollBar:vertical, QScrollBar:horizontal { background: #17243A; }
             QScrollBar:vertical { width: 13px; margin: 1px; }
             QScrollBar:horizontal { height: 13px; margin: 1px; }
