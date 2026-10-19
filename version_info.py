@@ -60,6 +60,25 @@ def read_commit_id(path: Path | None = None) -> str:
     return value.lower() if re.fullmatch(r"[0-9a-fA-F]{7}", value) else "unknown"
 
 
+def read_display_commit_id(commit_id: str) -> str:
+    """Mark uncommitted source changes without altering the build commit ID."""
+    if (commit_id == "unknown" or getattr(sys, "frozen", False)
+            or commit_file_path().is_file()):
+        return commit_id
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent),
+             "status", "--porcelain", "--untracked-files=normal"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return commit_id
+    return f"{commit_id}-dirty" if result.stdout.strip() else commit_id
+
+
 VERSION = read_version()
 DISPLAY_VERSION = f"v{VERSION}"
 COMMIT_ID = read_commit_id()
+DISPLAY_COMMIT_ID = read_display_commit_id(COMMIT_ID)

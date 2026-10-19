@@ -7,10 +7,11 @@ import os
 import json
 import shutil
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QEvent, QLockFile, QPoint, QRect, QRegularExpression, QSettings, QSize,
+    QEvent, QLockFile, QPoint, QRect, QRegularExpression, QSettings, QSignalBlocker, QSize,
     Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
@@ -30,7 +31,7 @@ from json_tools import (
     JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_key_initials, rewrite_json_like_quotes,
     rewrite_json_like_quote_escapes, searchable_spans, value_stats,
 )
-from version_info import COMMIT_ID, DISPLAY_VERSION
+from version_info import COMMIT_ID, DISPLAY_COMMIT_ID, DISPLAY_VERSION
 
 
 APP_VERSION = DISPLAY_VERSION
@@ -636,6 +637,8 @@ class JsonEditor(QPlainTextEdit):
         self.brace_extra_selections: list[QTextEdit.ExtraSelection] = []
         self.search_extra_selections: list[QTextEdit.ExtraSelection] = []
         self.selection_highlight_extra_selections: list[QTextEdit.ExtraSelection] = []
+        self._bookmark_end_padding = False
+        self.verticalScrollBar().rangeChanged.connect(self._update_bookmark_scroll_range)
         self.gutter = EditorGutter(self)
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter_area)
@@ -692,6 +695,43 @@ class JsonEditor(QPlainTextEdit):
         if changed:
             self.gutter.update()
             self.bookmarksChanged.emit()
+
+    def _update_bookmark_scroll_range(self, *_):
+        if not self._bookmark_end_padding:
+            return
+        # Permit the last displayed line to reach the top without enabling
+        # QPlainTextEdit's automatic centering while typing.
+        scrollbar = self.verticalScrollBar()
+        maximum = max(scrollbar.maximum(), self.document().lineCount() - 1)
+        if maximum != scrollbar.maximum():
+            scrollbar.setMaximum(maximum)
+
+    def go_to_bookmark(self, block_number: int):
+        block = self.document().findBlockByNumber(block_number)
+        if not block.isValid():
+            return
+        cursor = QTextCursor(block)
+        rect = self.cursorRect(cursor)
+        viewport = self.viewport().rect()
+        already_visible = (
+            block.isVisible()
+            and rect.top() >= viewport.top()
+            and rect.bottom() <= viewport.bottom()
+        )
+        scrollbar = self.verticalScrollBar()
+        previous_scroll = scrollbar.value()
+        self.reveal_block(block_number)
+        self.setTextCursor(cursor)
+        if already_visible:
+            scrollbar.setValue(previous_scroll)
+        else:
+            # Block line numbers count displayed lines, including wrapping
+            # and excluding folded lines, just like the vertical scrollbar.
+            self.document().documentLayout().blockBoundingRect(block)
+            if block.firstLineNumber() > scrollbar.maximum():
+                self._bookmark_end_padding = True
+            self._update_bookmark_scroll_range()
+            scrollbar.setValue(block.firstLineNumber())
 
     def gutter_width(self) -> int:
         number_width = 0
@@ -842,29 +882,23 @@ class JsonEditor(QPlainTextEdit):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         x = event.position().x()
-        if x < self.bookmark_column_width:
-            y = event.position().y()
-            block = self.firstVisibleBlock()
-            top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-            while block.isValid():
-                height = round(self.blockBoundingRect(block).height())
-                if block.isVisible() and top <= y < top + height:
-                    self.set_bookmark(block.blockNumber())
-                    return
-                if block.isVisible():
-                    top += height
-                block = block.next()
-            return
         marker_start = self.gutter_width() - self.fold_column_width
-        if x < marker_start:
-            return
         y = event.position().y()
         block = self.firstVisibleBlock()
         top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
         while block.isValid():
             height = round(self.blockBoundingRect(block).height())
             if block.isVisible() and top <= y < top + height:
-                self.toggle_fold(block.blockNumber())
+                if x >= marker_start:
+                    self.toggle_fold(block.blockNumber())
+                else:
+                    # Reuse the blank space before the right-aligned line
+                    # number without widening the gutter or moving its dot.
+                    number_left = marker_start
+                    if self.show_line_numbers:
+                        number_left -= 4 + self.fontMetrics().horizontalAdvance(str(block.blockNumber() + 1))
+                    if x < number_left:
+                        self.set_bookmark(block.blockNumber())
                 return
             if block.isVisible():
                 top += height
@@ -1118,6 +1152,22 @@ class JsonEditor(QPlainTextEdit):
             self._apply_fold_visibility()
 
 
+@dataclass
+class SearchState:
+    visible: bool = False
+    query: str = ""
+    case_sensitive: bool = False
+    whole_word: bool = False
+    in_selection: bool = False
+    scope: str = "all"
+    matches: list[tuple[int, int]] = field(default_factory=list)
+    index: int = -1
+    selection_range: tuple[int, int] | None = None
+    initial_selection: tuple[int, int] | None = None
+    candidate_selection: tuple[int, int] | None = None
+    revision: int = -1
+
+
 class JsonWindow(QMainWindow):
     minimum_editor_font_size = 8
     maximum_editor_font_size = 32
@@ -1126,6 +1176,7 @@ class JsonWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.next_tab_number = 1
+        self._search_editor: JsonEditor | None = None
         self.search_matches: list[tuple[int, int]] = []
         self.search_index = -1
         self.search_selection_range: tuple[int, int] | None = None
@@ -1865,6 +1916,7 @@ class JsonWindow(QMainWindow):
         editor.json_rendered_text = None
         editor.json_key_style = "double"
         editor.json_compact_mode = False
+        editor.search_state = SearchState()
         editor.json_stats_text = self.tr("等待输入", "Waiting for input")
         editor.json_stats_state = "waiting"
         editor.json_stats_counts = None
@@ -1886,25 +1938,23 @@ class JsonWindow(QMainWindow):
         self.editor_stack.insertWidget(index, editor)
         self._update_tab_count_button()
         self.tab_bar.setCurrentIndex(index)
-        self.editor_stack.setCurrentIndex(index)
+        self.switch_tab(index)
         self._update_fold_button()
         editor.setFocus()
         self._mark_session_dirty()
 
     def switch_tab(self, index: int):
         if 0 <= index < self.editor_stack.count():
+            target = self.editor_stack.widget(index)
+            if target is not self._search_editor:
+                self._save_search_state()
             self.editor_stack.setCurrentIndex(index)
+            if target is not self._search_editor:
+                self._search_editor = target
+                self._restore_search_state()
             self._refresh_active_status()
             self._update_tab_navigation()
             self._update_fold_button()
-            if self.search_bar.isVisible():
-                self.search_selection_range = None
-                self.initial_search_selection = None
-                self.search_candidate_selection = None
-                self.selection_button.blockSignals(True)
-                self.selection_button.setChecked(False)
-                self.selection_button.blockSignals(False)
-                self.perform_search()
             self._update_selection_highlights()
             self._mark_session_dirty()
 
@@ -2050,12 +2100,7 @@ class JsonWindow(QMainWindow):
             target = next((line for line in bookmarks if line > current_line), bookmarks[0])
         else:
             target = next((line for line in reversed(bookmarks) if line < current_line), bookmarks[-1])
-        editor.reveal_block(target)
-        block = editor.document().findBlockByNumber(target)
-        cursor = QTextCursor(editor.document())
-        cursor.setPosition(block.position())
-        editor.setTextCursor(cursor)
-        editor.ensureCursorVisible()
+        editor.go_to_bookmark(target)
         self._update_bookmark_status()
 
     def _update_bookmark_status(self):
@@ -2081,12 +2126,16 @@ class JsonWindow(QMainWindow):
             return
         if self.tab_bar.count() == 1:
             editor.clear()
+            editor.search_state = SearchState()
+            self._restore_search_state()
             self.tab_bar.setTabText(0, f"untitled-{self.next_tab_number}")
             self.next_tab_number += 1
             self._update_tab_count_button()
             self._mark_session_dirty()
             return
-        self.tab_bar.removeTab(index)
+        # Both tab collections must agree before currentChanged restores Find.
+        with QSignalBlocker(self.tab_bar):
+            self.tab_bar.removeTab(index)
         self.editor_stack.removeWidget(editor)
         editor.deleteLater()
         self._update_tab_count_button()
@@ -2126,7 +2175,7 @@ class JsonWindow(QMainWindow):
             return
         self.editor_stack.removeWidget(editor)
         self.editor_stack.insertWidget(new_index, editor)
-        self.editor_stack.setCurrentIndex(new_index)
+        self.switch_tab(new_index)
         self._mark_session_dirty()
 
     def rename_tab(self, index: int):
@@ -2231,7 +2280,7 @@ class JsonWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle(self.tr(f"关于 {APP_NAME}", f"About {APP_NAME}"))
         box.setIcon(QMessageBox.Icon.Information)
-        build_label = f" ({COMMIT_ID})" if COMMIT_ID != "unknown" else ""
+        build_label = f" ({DISPLAY_COMMIT_ID})" if DISPLAY_COMMIT_ID != "unknown" else ""
         box.setText(f"{APP_NAME} {APP_VERSION}{build_label}")
         box.setInformativeText(self.tr(
             "基于Python的版本：{version}\n\n"
@@ -2272,6 +2321,50 @@ class JsonWindow(QMainWindow):
         else:
             event.ignore()
 
+    def _save_search_state(self):
+        editor = self._search_editor
+        if editor is None:
+            return
+        editor.search_state = SearchState(
+            visible=not self.search_bar.isHidden(),
+            query=self.search_input.text(),
+            case_sensitive=self.case_button.isChecked(),
+            whole_word=self.word_button.isChecked(),
+            in_selection=self.selection_button.isChecked(),
+            scope=self.search_scope.currentData(),
+            matches=list(self.search_matches),
+            index=self.search_index,
+            selection_range=self.search_selection_range,
+            initial_selection=self.initial_search_selection,
+            candidate_selection=self.search_candidate_selection,
+            revision=editor.document().revision(),
+        )
+
+    def _restore_search_state(self):
+        state = self.editor.search_state
+        # Restoring the shared controls must not search or select a match.
+        with (QSignalBlocker(self.search_input), QSignalBlocker(self.case_button),
+              QSignalBlocker(self.word_button), QSignalBlocker(self.selection_button),
+              QSignalBlocker(self.search_scope)):
+            self.search_input.setText(state.query)
+            self.case_button.setChecked(state.case_sensitive)
+            self.word_button.setChecked(state.whole_word)
+            self.selection_button.setChecked(state.in_selection)
+            self.search_scope.setCurrentIndex(self.search_scope.findData(state.scope))
+        self.search_matches = list(state.matches)
+        self.search_index = state.index
+        self.search_selection_range = state.selection_range
+        self.initial_search_selection = state.initial_selection
+        self.search_candidate_selection = state.candidate_selection
+        self.search_bar.setVisible(state.visible)
+        if state.visible:
+            self._position_search_bar()
+        if state.visible and state.revision != self.editor.document().revision():
+            self.perform_search(select_match=False)
+        else:
+            self.match_label.setText(f"{state.index + 1} of {len(state.matches)}")
+            self._update_search_highlights()
+
     def open_search(self):
         if self.search_bar.isVisible():
             self.search_input.setFocus()
@@ -2287,9 +2380,9 @@ class JsonWindow(QMainWindow):
         self._position_search_bar()
         self.search_bar.raise_()
         if selected and "\n" not in selected:
-            self.search_input.setText(selected)
-        else:
-            self.perform_search()
+            with QSignalBlocker(self.search_input):
+                self.search_input.setText(selected)
+        self.perform_search()
         self.search_input.setFocus()
         self.search_input.selectAll()
 
@@ -2347,7 +2440,7 @@ class JsonWindow(QMainWindow):
     def _is_word_character(char: str) -> bool:
         return bool(char) and (char.isalnum() or char == "_")
 
-    def perform_search(self):
+    def perform_search(self, *, select_match: bool = True):
         if not self.search_bar.isVisible():
             return
         editor = self.editor
@@ -2389,7 +2482,11 @@ class JsonWindow(QMainWindow):
                 (index for index, (start, _) in enumerate(self.search_matches) if start >= cursor_position),
                 0,
             )
-            self._select_search_match()
+            if select_match:
+                self._select_search_match()
+            else:
+                self.match_label.setText(f"{self.search_index + 1} of {len(self.search_matches)}")
+                self._update_search_highlights()
         else:
             self.match_label.setText("0 of 0")
             self._update_search_highlights()

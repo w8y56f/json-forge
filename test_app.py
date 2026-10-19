@@ -16,6 +16,7 @@ from app import (
     APP_NAME,
     APP_VERSION,
     COMMIT_ID,
+    DISPLAY_COMMIT_ID,
     JsonEditor,
     JsonWindow,
     MoreSettingsDialog,
@@ -352,7 +353,7 @@ class LanguageUiTests(unittest.TestCase):
             self.window.show_about()
 
         dialog = dialog_type.return_value
-        dialog.setText.assert_called_once_with(f"{APP_NAME} {APP_VERSION} ({COMMIT_ID})")
+        dialog.setText.assert_called_once_with(f"{APP_NAME} {APP_VERSION} ({DISPLAY_COMMIT_ID})")
         dialog.exec.assert_called_once()
 
     def test_line_wrap_button_precedes_fold_and_persists_for_all_tabs(self):
@@ -922,6 +923,149 @@ class FindSelectionTests(unittest.TestCase):
         os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
         self.directory.cleanup()
 
+    def test_tabs_restore_search_without_moving_cursor_or_view(self):
+        window = self.window
+
+        def view_state(editor):
+            cursor = editor.textCursor()
+            return (cursor.position(), cursor.anchor(),
+                    editor.verticalScrollBar().value(), editor.horizontalScrollBar().value())
+
+        editors = []
+        expected = []
+        for index, query in enumerate(("alpha", "beta")):
+            if index:
+                window.add_tab()
+            editor = window.editor
+            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            editor.setPlainText("\n".join(f"{query} {line} " + "x" * 300 for line in range(120)))
+            window.open_search()
+            window.search_input.setText(query)
+            window.navigate_search(1)
+            cursor = editor.textCursor()
+            cursor.setPosition(500)
+            cursor.setPosition(490, QTextCursor.MoveMode.KeepAnchor)
+            editor.setTextCursor(cursor)
+            editor.verticalScrollBar().setValue(45 + index * 10)
+            editor.horizontalScrollBar().setValue(100 + index * 10)
+            self.app.processEvents()
+            editors.append(editor)
+            expected.append((view_state(editor), window.match_label.text(), list(window.search_matches)))
+
+        with patch.object(window, "perform_search", wraps=window.perform_search) as search:
+            for index in (0, 1, 0, 1):
+                window.tab_bar.setCurrentIndex(index)
+                self.app.processEvents()
+                self.assertEqual(window.search_input.text(), ("alpha", "beta")[index])
+                self.assertEqual(view_state(editors[index]), expected[index][0])
+                self.assertEqual(window.match_label.text(), expected[index][1])
+                self.assertEqual(window.search_matches, expected[index][2])
+            search.assert_not_called()
+
+        window.search_input.setFocus()
+        QTest.keyClick(window.search_input, Qt.Key.Key_Return)
+        self.assertEqual(window.search_index, 2)
+        self.assertEqual(window.editor.textCursor().selectionStart(), window.search_matches[2][0])
+        QTest.keyClick(window.search_input, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(window.search_index, 1)
+
+    def test_search_visibility_and_options_belong_to_each_tab(self):
+        window = self.window
+        editor = window.editor
+        editor.setPlainText('"Alpha"\n"Alpha"\n"alpha"')
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(15, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        window.open_search()
+        window.search_input.setText("Alpha")
+        window.case_button.setChecked(True)
+        window.word_button.setChecked(True)
+        window.search_scope.setCurrentIndex(2)
+        window.selection_button.setChecked(True)
+        matches = list(window.search_matches)
+        candidate = window.search_candidate_selection
+
+        window.add_tab()
+        self.assertFalse(window.search_bar.isVisible())
+        self.assertEqual(window.search_input.text(), "")
+        self.assertFalse(window.case_button.isChecked())
+        self.assertFalse(window.word_button.isChecked())
+        self.assertFalse(window.selection_button.isChecked())
+        self.assertEqual(window.search_scope.currentData(), "all")
+        self.assertIsNone(window.search_selection_range)
+        window.editor.setPlainText("beta beta")
+        window.open_search()
+        window.search_input.setText("beta")
+        window.close_search()
+
+        with patch("app.QMessageBox.warning") as warning:
+            window.tab_bar.setCurrentIndex(0)
+            warning.assert_not_called()
+        self.assertTrue(window.search_bar.isVisible())
+        self.assertEqual(window.search_input.text(), "Alpha")
+        self.assertTrue(window.case_button.isChecked())
+        self.assertTrue(window.word_button.isChecked())
+        self.assertTrue(window.selection_button.isChecked())
+        self.assertEqual(window.search_scope.currentData(), "values")
+        self.assertEqual(window.search_selection_range, (0, 15))
+        self.assertEqual(window.initial_search_selection, (0, 15))
+        self.assertEqual(window.search_candidate_selection, candidate)
+        self.assertEqual(window.search_matches, matches)
+
+        window.close_search()
+        window.tab_bar.setCurrentIndex(1)
+        self.assertFalse(window.search_bar.isVisible())
+        self.assertEqual(window.search_input.text(), "beta")
+        window.open_search()
+        self.assertTrue(window.search_bar.isVisible())
+        self.assertEqual(window.search_matches, [(0, 4), (5, 9)])
+        window.tab_bar.setCurrentIndex(0)
+        self.assertFalse(window.search_bar.isVisible())
+
+    def test_reordering_and_closing_tabs_keeps_search_with_document(self):
+        window = self.window
+        editors = []
+        for index, query in enumerate(("alpha", "beta", "gamma")):
+            if index:
+                window.add_tab()
+            window.editor.setPlainText(query + " " + query)
+            window.open_search()
+            window.search_input.setText(query)
+            window.navigate_search(1)
+            editors.append(window.editor)
+        window.tab_bar.moveTab(2, 0)
+        self.assertIs(window.editor, editors[2])
+        self.assertEqual(window.search_input.text(), "gamma")
+        window.tab_bar.setCurrentIndex(1)
+        self.assertIs(window.editor, editors[0])
+        self.assertEqual(window.search_input.text(), "alpha")
+        with patch.object(window, "_confirm_close_tab", return_value=True):
+            window.close_tab(0)
+            self.assertIs(window.editor, editors[0])
+            self.assertEqual(window.search_input.text(), "alpha")
+            window.close_tab(0)
+            self.assertIs(window.editor, editors[1])
+            self.assertEqual(window.search_input.text(), "beta")
+            self.assertEqual(window.search_index, 1)
+            window.close_tab(0)
+        self.assertFalse(window.search_bar.isVisible())
+        self.assertEqual(window.search_input.text(), "")
+        self.assertEqual(window.search_matches, [])
+
+    def test_inactive_document_changes_refresh_matches_without_navigation(self):
+        window = self.window
+        editor = window.editor
+        editor.setPlainText("alpha alpha")
+        window.open_search()
+        window.search_input.setText("alpha")
+        window.add_tab()
+        editor.setPlainText("prefix alpha")
+        before = editor.textCursor().position()
+        window.tab_bar.setCurrentIndex(0)
+        self.assertEqual(window.search_matches, [(7, 12)])
+        self.assertEqual(editor.textCursor().position(), before)
+
     def test_reenabling_selection_search_does_not_reuse_old_range(self):
         editor = self.window.editor
         editor.setPlainText("alpha\nbeta\nalpha")
@@ -989,6 +1133,91 @@ class BookmarkTests(unittest.TestCase):
         self.editor.deleteLater()
         self.app.processEvents()
 
+    def _show_document(self, text, *, wrap=False, height=240):
+        self.editor.resize(600, height)
+        self.editor.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.WidgetWidth if wrap
+            else QPlainTextEdit.LineWrapMode.NoWrap
+        )
+        self.editor.setPlainText(text)
+        self.editor.show()
+        self.app.processEvents()
+
+    def test_visible_bookmark_preserves_scroll_position(self):
+        self._show_document("\n".join(f"line {i}" for i in range(200)))
+        scrollbar = self.editor.verticalScrollBar()
+        scrollbar.setValue(50)
+        self.app.processEvents()
+        for target in (52, 55, 51):
+            self.editor.go_to_bookmark(target)
+            self.app.processEvents()
+            self.assertEqual(self.editor.textCursor().blockNumber(), target)
+            self.assertEqual(scrollbar.value(), 50)
+
+    def test_offscreen_bookmarks_align_at_top_including_document_end(self):
+        self._show_document("\n".join(f"line {i}" for i in range(200)))
+        original = self.editor.toPlainText()
+        for target in (100, 20, 199, 0):
+            self.editor.go_to_bookmark(target)
+            self.app.processEvents()
+            self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), target)
+            self.assertLessEqual(self.editor.cursorRect().top(), self.editor.document().documentMargin())
+            self.assertGreaterEqual(self.editor.cursorRect().top(), 0)
+        self.assertEqual(self.editor.toPlainText(), original)
+        self.assertFalse(self.editor.centerOnScroll())
+        # Retain the trailing space when Qt recomputes the scrollbar range.
+        self.editor.go_to_bookmark(199)
+        self.editor.resize(600, 320)
+        self.app.processEvents()
+        self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), 199)
+        self.assertEqual(self.editor.cursorRect().top(), 0)
+        self.editor.insertPlainText(" edited")
+        self.app.processEvents()
+        self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), 199)
+        self.assertEqual(self.editor.cursorRect().top(), 0)
+
+    def test_partially_visible_bookmark_moves_to_top(self):
+        self._show_document("\n".join(f"line {i}" for i in range(200)), height=247)
+        viewport = self.editor.viewport().rect()
+        cursor = self.editor.cursorForPosition(QPoint(5, viewport.bottom()))
+        cursor.setPosition(cursor.block().position())
+        self.assertGreater(self.editor.cursorRect(cursor).bottom(), viewport.bottom())
+        self.editor.go_to_bookmark(cursor.blockNumber())
+        self.app.processEvents()
+        self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), cursor.blockNumber())
+        self.assertEqual(self.editor.cursorRect().top(), 0)
+
+    def test_wrapped_bookmarks_use_display_lines_for_top_alignment(self):
+        self._show_document("\n".join(f"line {i} " + "word " * 60 for i in range(100)), wrap=True)
+        for target in (50, 99, 5):
+            self.editor.go_to_bookmark(target)
+            self.app.processEvents()
+            self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), target)
+            self.assertEqual(self.editor.cursorRect().top(), 0)
+
+    def test_visible_start_of_long_wrapped_bookmark_does_not_scroll(self):
+        self._show_document("first\n" + "word " * 2000, wrap=True)
+        before = self.editor.verticalScrollBar().value()
+        self.editor.go_to_bookmark(1)
+        self.app.processEvents()
+        self.assertEqual(self.editor.verticalScrollBar().value(), before)
+
+    def test_folded_bookmarks_reveal_and_align_at_top(self):
+        self._show_document("{\n" + "\n".join(f'"key{i}": {i},' for i in range(80))
+                            + "\n}\n" + "\n".join(f"tail {i}" for i in range(100)))
+        self.editor.toggle_fold(0)
+        self.app.processEvents()
+        self.assertFalse(self.editor.document().findBlockByNumber(40).isVisible())
+        # Hidden lines above the target do not count as scrollbar steps.
+        self.editor.go_to_bookmark(130)
+        self.app.processEvents()
+        self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), 130)
+        self.editor.go_to_bookmark(40)
+        self.app.processEvents()
+        self.assertTrue(self.editor.document().findBlockByNumber(40).isVisible())
+        self.assertEqual(self.editor.firstVisibleBlock().blockNumber(), 40)
+        self.assertEqual(self.editor.cursorRect().top(), 0)
+
     def test_bookmarks_toggle_and_click_in_gutter(self):
         self.editor.resize(600, 240)
         self.editor.show()
@@ -1000,6 +1229,17 @@ class BookmarkTests(unittest.TestCase):
         QTest.mouseClick(self.editor.gutter, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(6, int(y)))
         self.assertEqual(self.editor.bookmark_block_numbers(), [1])
         self.editor.set_bookmark(1)
+        self.assertEqual(self.editor.bookmark_block_numbers(), [])
+
+        self.assertEqual(self.editor.bookmark_column_width, 18)
+        marker_start = self.editor.gutter_width() - self.editor.fold_column_width
+        number_left = marker_start - 4 - self.editor.fontMetrics().horizontalAdvance("2")
+        self.assertGreater(number_left - 1, self.editor.bookmark_column_width)
+        QTest.mouseClick(self.editor.gutter, Qt.MouseButton.LeftButton, pos=QPoint(number_left - 1, int(y)))
+        self.assertEqual(self.editor.bookmark_block_numbers(), [1])
+        QTest.mouseClick(self.editor.gutter, Qt.MouseButton.LeftButton, pos=QPoint(number_left + 1, int(y)))
+        self.assertEqual(self.editor.bookmark_block_numbers(), [1])
+        QTest.mouseClick(self.editor.gutter, Qt.MouseButton.LeftButton, pos=QPoint(number_left - 1, int(y)))
         self.assertEqual(self.editor.bookmark_block_numbers(), [])
 
     def test_window_shortcuts_cycle_and_update_status(self):
@@ -1031,6 +1271,21 @@ class BookmarkTests(unittest.TestCase):
         QTest.keyClick(editor, Qt.Key.Key_F2, Qt.KeyboardModifier.ShiftModifier)
         self.app.processEvents()
         self.assertEqual(editor.textCursor().blockNumber(), 3)
+        editor.setPlainText("\n".join(f"line {i}" for i in range(200)))
+        for line in (50, 55, 199):
+            editor.set_bookmark(line, True)
+        self.app.processEvents()
+        for target, expected_top, modifiers in (
+            (50, 50, Qt.KeyboardModifier.NoModifier),
+            (55, 50, Qt.KeyboardModifier.NoModifier),
+            (199, 199, Qt.KeyboardModifier.NoModifier),
+            (50, 50, Qt.KeyboardModifier.NoModifier),
+            (199, 199, Qt.KeyboardModifier.ShiftModifier),
+        ):
+            QTest.keyClick(editor, Qt.Key.Key_F2, modifiers)
+            self.app.processEvents()
+            self.assertEqual(editor.textCursor().blockNumber(), target)
+            self.assertEqual(editor.firstVisibleBlock().blockNumber(), expected_top)
         window.deleteLater()
         self.app.processEvents()
 
