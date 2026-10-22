@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit
+from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit, QTabBar
 
 from app import (
     APP_NAME,
@@ -922,6 +922,56 @@ class FindSelectionTests(unittest.TestCase):
         os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
         os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
         self.directory.cleanup()
+
+    def test_middle_click_closes_inactive_tab_without_confirmation(self):
+        window = self.window
+        window.editor.setPlainText("background content")
+        window.add_tab()
+        active_editor = window.editor
+        active_editor.setPlainText("active content")
+        self.app.processEvents()
+
+        with patch.object(window, "_confirm_close_tab", return_value=False) as confirm:
+            QTest.mouseClick(
+                window.tab_bar, Qt.MouseButton.MiddleButton,
+                pos=window.tab_bar.tabRect(0).center(),
+            )
+        confirm.assert_not_called()
+        self.assertEqual(window.tab_bar.count(), 1)
+        self.assertIs(window.editor, active_editor)
+        self.assertEqual(window.editor.toPlainText(), "active content")
+
+    def test_middle_click_clears_last_tab_without_confirmation(self):
+        window = self.window
+        window.editor.setPlainText("last tab content")
+        with patch.object(window, "_confirm_close_tab", return_value=False) as confirm:
+            QTest.mouseClick(
+                window.tab_bar, Qt.MouseButton.MiddleButton,
+                pos=window.tab_bar.tabRect(0).center(),
+            )
+        confirm.assert_not_called()
+        self.assertEqual(window.tab_bar.count(), 1)
+        self.assertEqual(window.editor.toPlainText(), "")
+
+    def test_close_button_requires_confirmation_for_nonempty_tab(self):
+        window = self.window
+        window.editor.setPlainText("content to close")
+        window.add_tab()
+        self.app.processEvents()
+        button = next(
+            button for side in (QTabBar.ButtonPosition.LeftSide, QTabBar.ButtonPosition.RightSide)
+            if (button := window.tab_bar.tabButton(0, side)) is not None
+        )
+        with patch.object(window, "_confirm_close_tab", return_value=False) as confirm:
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        confirm.assert_called_once_with(window.tab_bar.tabText(0))
+        self.assertEqual(window.tab_bar.count(), 2)
+        self.assertEqual(window.editor_stack.widget(0).toPlainText(), "content to close")
+
+        with patch.object(window, "_confirm_close_tab", return_value=True) as confirm:
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        confirm.assert_called_once()
+        self.assertEqual(window.tab_bar.count(), 1)
 
     def test_tabs_restore_search_without_moving_cursor_or_view(self):
         window = self.window

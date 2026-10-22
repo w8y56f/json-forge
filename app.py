@@ -347,7 +347,23 @@ class DragBar(QFrame):
 class DocumentTabBar(QTabBar):
     """Tab bar whose hover hint reveals a title only when it is elided."""
 
+    middleClickCloseRequested = Signal(int)
     rename_hint = "双击标签标题可重命名"
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            index = self.tabAt(event.position().toPoint())
+            if index >= 0:
+                self.middleClickCloseRequested.emit(index)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1807,6 +1823,9 @@ class JsonWindow(QMainWindow):
         self.tab_right_button.clicked.connect(lambda: self.navigate_tab(1))
         self.tab_bar.currentChanged.connect(self.switch_tab)
         self.tab_bar.tabCloseRequested.connect(self.close_tab)
+        self.tab_bar.middleClickCloseRequested.connect(
+            lambda index: self.close_tab(index, confirm=False)
+        )
         self.tab_bar.tabBarDoubleClicked.connect(self.rename_tab)
         self.tab_bar.tabMoved.connect(self.move_tab)
         self.tab_bar.customContextMenuRequested.connect(self.show_tab_context_menu)
@@ -2116,13 +2135,13 @@ class JsonWindow(QMainWindow):
             total=len(bookmarks),
         ))
 
-    def close_tab(self, index: int):
+    def close_tab(self, index: int, *, confirm: bool = True):
         if index < 0:
             return
         editor = self.editor_stack.widget(index)
         if editor is None:
             return
-        if editor.toPlainText() and not self._confirm_close_tab(self.tab_bar.tabText(index)):
+        if confirm and editor.toPlainText() and not self._confirm_close_tab(self.tab_bar.tabText(index)):
             return
         if self.tab_bar.count() == 1:
             editor.clear()
