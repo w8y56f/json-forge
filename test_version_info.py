@@ -115,6 +115,8 @@ class VersionInfoTests(unittest.TestCase):
         self.assertEqual(windows["ARCHIVE_NAME"], f"JSON-Forge-v{VERSION}-windows-x86_64.zip")
         self.assertEqual(windows["OUTPUT_NAME"], f"JSON-Forge-v{VERSION}-windows-x86_64.exe")
         self.assertIn("assets/JSON-Forge.png", portable["SOURCE_FILES"])
+        self.assertIn("assets/JSON-Forge.ico", portable["SOURCE_FILES"])
+        self.assertIn("windows_taskbar.py", portable["SOURCE_FILES"])
         self.assertIn("Reference Book.md", portable["SOURCE_FILES"])
         self.assertRegex(portable["COMMIT_ID"], r"^[0-9a-f]{7}$")
         self.assertTrue((root / "assets" / "JSON-Forge.icns").is_file())

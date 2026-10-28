@@ -32,6 +32,9 @@ from json_tools import (
     rewrite_json_like_quote_escapes, searchable_spans, value_stats,
 )
 from version_info import COMMIT_ID, DISPLAY_COMMIT_ID, DISPLAY_VERSION
+from windows_taskbar import (
+    clear_window_identity, configure_process_identity, configure_window_identity,
+)
 
 
 APP_VERSION = DISPLAY_VERSION
@@ -2336,6 +2339,9 @@ class JsonWindow(QMainWindow):
         ) or self._confirm_exit():
             self._session_save_timer.stop()
             self._save_session(force=True)
+            if getattr(self, "_taskbar_hwnd", None) is not None:
+                clear_window_identity(self._taskbar_hwnd)
+                self._taskbar_hwnd = None
             event.accept()
         else:
             event.ignore()
@@ -3486,6 +3492,7 @@ class JsonWindow(QMainWindow):
 
 
 def main():
+    configure_process_identity()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(QIcon(str(application_icon_path())))
@@ -3513,6 +3520,10 @@ def main():
     window = JsonWindow()
     # Keep the QLockFile alive for the full lifetime of the process.
     window._instance_lock = instance_lock
+    if sys.platform == "win32":
+        hwnd = int(window.winId())
+        if configure_window_identity(hwnd, bundled_resource_path(), APP_NAME):
+            window._taskbar_hwnd = hwnd
     window.show()
     sys.exit(app.exec())
 

@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QCloseEvent, QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit, QTabBar
 
@@ -306,6 +306,24 @@ class LanguageUiTests(unittest.TestCase):
     def tearDown(self):
         self.window.deleteLater()
         self.app.processEvents()
+
+    def test_taskbar_properties_are_cleared_only_when_close_is_accepted(self):
+        self.window._taskbar_hwnd = 123
+        self.window.settings.setValue("confirm_exit", True)
+        with (patch("app.clear_window_identity") as clear,
+              patch.object(self.window, "_confirm_exit", return_value=False) as confirm):
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+            clear.assert_not_called()
+            self.assertEqual(self.window._taskbar_hwnd, 123)
+
+            confirm.return_value = True
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+            self.assertTrue(event.isAccepted())
+            clear.assert_called_once_with(123)
+            self.assertIsNone(self.window._taskbar_hwnd)
 
     def test_language_switch_updates_buttons_hover_and_status(self):
         self.assertEqual(self.window.theme, "light")

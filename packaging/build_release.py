@@ -69,12 +69,14 @@ SOURCE_FILES = (
     "app.py",
     "json_tools.py",
     "version_info.py",
+    "windows_taskbar.py",
     "requirements.txt",
     "README.md",
     "Reference Book.md",
     "start.sh",
     "start.bat",
     "assets/JSON-Forge.png",
+    "assets/JSON-Forge.ico",
 )
 
 

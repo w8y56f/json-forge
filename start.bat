@@ -2,6 +2,7 @@
 setlocal
 set "APP_DIR=%~dp0"
 set "PYTHONW="
+set "JSON_FORGE_LAUNCHER_PATH="
 
 rem Use pythonw.exe so double-clicking this file does not leave a console
 rem window open while the GUI application is running.

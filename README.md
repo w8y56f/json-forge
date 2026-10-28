@@ -100,6 +100,10 @@ python packaging/build_release.py --target windows-x86_64
 `%LOCALAPPDATA%\JSON Forge\runtime-v<version>`，用户会话与单实例锁保存在
 `%APPDATA%\JSON Forge\cache`（不可用时回退到 `%LOCALAPPDATA%`）。该本地构建没有商业代码签名，Windows SmartScreen 可能显示提示。
 
+从 v1.6.2 起，Windows 任务栏固定项使用 JSON Forge 的应用身份和图标，并保留正确的启动入口。
+如果此前固定后显示 Python 或空白图标，请取消旧固定项，启动新版后重新固定。
+固定后请保留 EXE 或便携目录的位置；移动或删除后需要重新固定。
+
 生成的目录和压缩包会放在 `dist/`，文件名中的 `v<version>` 自动读取根目录 `VERSION`（macOS 为 `.tar.gz`，Windows 为 `.zip`，可直接用资源管理器解压）。跨平台制作 Windows 包时建议先安装 [uv](https://docs.astral.sh/uv/)，它可以在非 Windows 电脑上下载对应的 Windows PySide6 依赖；也可以直接在 Windows 电脑上运行脚本。`dist/`、`downloads/` 和运行时文件已加入 `.gitignore`，不会提交到 Git。
 
 同版本重复打包时，已有正式产物不会直接删除，而会先重命名为带本地时间戳前缀的备份，

@@ -104,6 +104,10 @@ func extractPayload(destination string) error {
 }
 
 func launch(root string) error {
+	launcher, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("unable to locate application launcher: %w", err)
+	}
 	python := filepath.Join(root, "runtime", "python", "pythonw.exe")
 	application := filepath.Join(root, "app.py")
 	if _, err := os.Stat(python); err != nil {
@@ -117,6 +121,7 @@ func launch(root string) error {
 	command := exec.Command(python, append([]string{application}, os.Args[1:]...)...)
 	command.Dir = root
 	command.Env = append(os.Environ(),
+		"JSON_FORGE_LAUNCHER_PATH="+launcher,
 		"JSON_STUDIO_SETTINGS_PATH="+filepath.Join(dataRoot, "config", "settings.ini"),
 		"JSON_STUDIO_SESSION_PATH="+filepath.Join(dataRoot, "cache", "session.json"),
 		"JSON_STUDIO_INSTANCE_LOCK_PATH="+filepath.Join(dataRoot, "cache", "json-forge.lock"),

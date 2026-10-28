@@ -59,7 +59,7 @@ def main() -> int:
                 f"-s -w -H=windowsgui -X main.payloadVersion={DISPLAY_VERSION}",
                 "-o",
                 str(output),
-                "main.go",
+                ".",
             ]
             print("+", " ".join(command), flush=True)
             subprocess.run(command, cwd=temporary, env=environment, check=True)
