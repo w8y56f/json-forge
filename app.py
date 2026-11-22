@@ -1336,6 +1336,10 @@ class JsonWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._disk_check_timer = QTimer(self)
+        self._disk_check_timer.setSingleShot(True)
+        self._disk_check_timer.timeout.connect(self._check_focused_files)
+        self._checking_files = False
         self.next_tab_number = 1
         self.tabs: list[WorkspaceTab] = []
         self._compare_visible = False
@@ -2414,8 +2418,76 @@ class JsonWindow(QMainWindow):
         editor.setFocus()
         self._mark_session_dirty()
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._schedule_disk_check()
+
+    def _schedule_disk_check(self):
+        if getattr(self, "_session_ready", False) and not self._checking_files:
+            self._disk_check_timer.start(0)
+
+    def _check_focused_files(self):
+        index = self.tab_bar.currentIndex()
+        if not self.isActiveWindow() or not 0 <= index < len(self.tabs):
+            return
+        tab = self.tabs[index]
+        editors = ([tab.widget] if tab.kind == "document"
+                   else [self._find_document(key) for key in tab.sources])
+        self._checking_files = True
+        try:
+            for editor in editors:
+                if editor is None or editor.file.path is None:
+                    continue
+                if self._check_file(editor):
+                    break
+        finally:
+            self._checking_files = False
+
+    def _check_file(self, editor):
+        path = editor.file.path
+        try:
+            if hashlib.sha256(path.read_bytes()).hexdigest() == editor.file.digest:
+                return False
+            title = self.tr("文件已被修改", "File has been modified")
+            button = self.tr("重新加载", "Reload")
+            deleted = False
+        except FileNotFoundError:
+            title = self.tr("文件已被删除", "File has been deleted")
+            button = self.tr("确认", "OK")
+            deleted = True
+        except OSError as error:
+            self._file_error(path, error)
+            return False
+
+        box = QMessageBox(QMessageBox.Icon.Warning, title, f"{title}\n{path}", parent=self)
+        box.addButton(button, QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if deleted:
+            for tab in list(self._comparisons()):
+                if editor.document_id in tab.sources:
+                    self.close_tab(self.tabs.index(tab), confirm=False)
+            editor.file = FileBinding()
+            self.close_tab(self._document_tab_index(editor), confirm=False)
+            self._disk_check_timer.start(0)
+            return True
+        try:
+            binding, content = FileBinding.read(path)
+        except FileNotFoundError:
+            self._disk_check_timer.start(0)
+            return True
+        except (OSError, ValueError) as error:
+            self._file_error(path, error)
+            return False
+        editor.file = binding
+        editor.setPlainText(content)
+        self._update_file_icon(editor)
+        self._mark_session_dirty()
+        return False
+
     def switch_tab(self, index: int):
         if 0 <= index < len(self.tabs):
+            self._schedule_disk_check()
             tab = self.tabs[index]
             if tab.kind == "compare":
                 self._set_workspace_mode(tab.widget)

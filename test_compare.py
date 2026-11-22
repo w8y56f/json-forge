@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
@@ -114,6 +115,32 @@ class CompareTests(unittest.TestCase):
         self.window._compare_selected_documents()
         self.wait_result()
         return left_editor, right_editor
+
+    def test_focus_reloads_file_and_deletion_closes_comparison(self):
+        path = Path(self.directory.name) / "example.json"
+        path.write_text("1")
+        window = self.window
+        window._open_paths([path])
+        editor = window.editor
+        window.tab_bar.setCurrentIndex(0)
+        path.write_text("2")
+        with patch("app.QMessageBox.exec", return_value=0) as prompt:
+            window.tab_bar.setCurrentIndex(window._document_tab_index(editor))
+            self.app.processEvents()
+            self.assertEqual(editor.toPlainText(), "2")
+            prompt.assert_called_once()
+            for i in range(2):
+                window.document_list.item(i).setSelected(True)
+            window._compare_selected_documents()
+            self.wait_result()
+            editor.setPlainText("local edit")
+            path.unlink()
+            window.tab_bar.setCurrentIndex(0)
+            window.tab_bar.setCurrentIndex(2)
+            self.app.processEvents()
+            self.assertEqual(prompt.call_count, 2)
+            self.assertEqual(len(window.tabs), 1)
+            self.assertIsNone(window._editor_for_path(path))
 
     def test_ignore_width_is_stable_and_only_title_text_activates_source(self):
         self.open_pair()
