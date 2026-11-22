@@ -7,25 +7,32 @@ import os
 import json
 import shutil
 import tempfile
+import codecs
+import hashlib
+import subprocess
+from uuid import uuid4
+from typing import Literal
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QEvent, QLockFile, QPoint, QRect, QRegularExpression, QSettings, QSignalBlocker, QSize,
+    QEvent, QLockFile, QFile, QSaveFile, QIODevice, QUrl, QPoint, QRect, QRegularExpression, QSettings, QSignalBlocker, QSize,
     Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
+    QDesktopServices, QAction, QActionGroup, QColor, QFontDatabase, QFont, QIcon, QKeySequence, QPainter, QPen,
     QPixmap, QPolygon, QShortcut, QTextBlockUserData, QTextCharFormat, QTextCursor,
     QTextDocument, QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QSpinBox, QFileDialog, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QMenu, QSizePolicy, QStackedWidget, QStatusBar,
     QStyle, QTabBar, QTabWidget, QTextEdit, QToolButton, QToolTip, QVBoxLayout,
-    QWidget, QPlainTextEdit,
+    QWidget, QPlainTextEdit, QListWidget, QListWidgetItem, QAbstractItemView, QSplitter,
 )
+
+from compare_view import CompareView, update_document_text, HIGHLIGHTS, VIEWERS
 
 from json_tools import (
     JsonToolError, format_json_like, json5_minify_risks, parse_json_like, path_at_position, render_json, rewrite_json_like_key_initials, rewrite_json_like_quotes,
@@ -347,6 +354,17 @@ class DragBar(QFrame):
         super().mousePressEvent(event)
 
 
+class DocumentList(QListWidget):
+    """Preserve a multi-selection when its context menu is opened."""
+
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        if event.button() == Qt.MouseButton.RightButton and item is not None and item.isSelected():
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class DocumentTabBar(QTabBar):
     """Tab bar whose hover hint reveals a title only when it is elided."""
 
@@ -411,6 +429,10 @@ def setting_as_int(settings: QSettings, key: str, default: int, minimum: int, ma
     return max(minimum, min(maximum, value))
 
 
+def system_ui_size():
+    return max(9, min(24, round(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).pointSizeF())))
+
+
 class MoreSettingsDialog(QDialog):
     def __init__(self, settings: QSettings, language: str, parent=None):
         super().__init__(parent)
@@ -436,10 +458,19 @@ class MoreSettingsDialog(QDialog):
         self.language_combo = QComboBox()
         self.language_combo.addItem("中文", "zh_CN")
         self.language_combo.addItem("English", "en")
-        saved_language = settings.value("language", default_setting("language", "zh_CN"))
+        saved_language = settings.value("language", default_setting("language", "en"))
         language_index = self.language_combo.findData(saved_language)
         self.language_combo.setCurrentIndex(max(0, language_index))
         form.addRow(tr("语言：", "Language:"), self.language_combo)
+        self.ui_size = QSpinBox()
+        self.ui_size.setRange(9, 24)
+        self.editor_size = QSpinBox()
+        self.editor_size.setRange(8, 32)
+        for field, label in ((self.ui_size, tr("界面字号", "Interface font size")),
+                             (self.editor_size, tr("编辑器字号", "Editor font size"))):
+            field.setSuffix(" pt")
+            form.addRow(label, field)
+        self._load_font_sizes()
         general_layout.addLayout(form)
         self.line_numbers_checkbox = QCheckBox(tr("显示行号", "Show line numbers"))
         self.line_numbers_checkbox.setChecked(
@@ -464,22 +495,69 @@ class MoreSettingsDialog(QDialog):
         )
         general_layout.addWidget(self.brace_guides_checkbox)
         self.restore_defaults_button = QPushButton(
-            tr("恢复默认配置", "Restore Default Settings")
+            tr("恢复全部默认设置", "Restore All Defaults")
         )
         self.restore_defaults_button.clicked.connect(self.restore_defaults)
-        general_layout.addWidget(self.restore_defaults_button)
         general_layout.addStretch()
-        tabs.addTab(general, "General")
+        tabs.addTab(general, tr("常规", "General"))
+        compare = QWidget()
+        options = QFormLayout(compare)
+        scope_hint = QLabel(tr(
+            "以下设置用于新建的对比页。每个对比页都可以单独调整。",
+            "These defaults apply to new comparisons. Each comparison has its own settings.",
+        ))
+        scope_hint.setWordWrap(True)
+        options.addRow(scope_hint)
+        self.compare_defaults = {}
+        for key, label, choices in (
+            ("diff_highlight", tr("差异高亮", "Highlight differences"), HIGHLIGHTS),
+            ("diff_viewer", tr("视图", "Viewer"), VIEWERS),
+        ):
+            combo = QComboBox()
+            for value, zh, en in choices:
+                combo.addItem(tr(zh, en), value)
+            self.compare_defaults[key] = combo
+            options.addRow(label, combo)
+        self.align_default = QCheckBox(tr("并排对齐差异", "Align side-by-side changes"))
+        options.addRow(self.align_default)
+        self.sync_default = QCheckBox(tr("同步滚动", "Sync scrolling"))
+        options.addRow(self.sync_default)
+        self.wrap_default = QCheckBox(tr("自动换行", "Soft wrap"))
+        options.addRow(self.wrap_default)
+        self._load_compare_defaults()
+        tabs.addTab(compare, tr("对比", "Comparison"))
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox()
+        buttons.addButton(self.restore_defaults_button, QDialogButtonBox.ButtonRole.ResetRole)
         save_button = buttons.addButton(tr("保存", "Save"), QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_button = buttons.addButton(tr("取消", "Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
         save_button.clicked.connect(self.accept)
         cancel_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _load_font_sizes(self):
+        self.ui_size.setValue(setting_as_int(self.settings, "ui_font_size", system_ui_size(), 9, 24))
+        self.editor_size.setValue(setting_as_int(self.settings, "editor_font_size", 13, 8, 32))
+
+    def _load_compare_defaults(self):
+        for key, combo in self.compare_defaults.items():
+            combo.setCurrentIndex(max(0, combo.findData(self.settings.value(key, combo.itemData(0)))))
+        self.wrap_default.setChecked(setting_as_bool(self.settings, "diff_wrap", False))
+        self.sync_default.setChecked(setting_as_bool(self.settings, "diff_sync", True))
+        self.align_default.setChecked(setting_as_bool(self.settings, "diff_align", False))
+
     def accept(self):
+        if self.ui_size.value() == system_ui_size():
+            self.settings.remove("ui_font_size")
+        else:
+            self.settings.setValue("ui_font_size", self.ui_size.value())
+        self.settings.setValue("editor_font_size", self.editor_size.value())
+        for key, combo in self.compare_defaults.items():
+            self.settings.setValue(key, combo.currentData())
+        self.settings.setValue("diff_wrap", self.wrap_default.isChecked())
+        self.settings.setValue("diff_sync", self.sync_default.isChecked())
+        self.settings.setValue("diff_align", self.align_default.isChecked())
         self.settings.setValue("confirm_exit", self.confirm_exit_checkbox.isChecked())
         self.settings.setValue("show_line_numbers", self.line_numbers_checkbox.isChecked())
         self.settings.setValue("tab_style", self.tab_style_combo.currentData())
@@ -490,10 +568,12 @@ class MoreSettingsDialog(QDialog):
         super().accept()
 
     def _load_controls_from_settings(self):
+        self._load_font_sizes()
+        self._load_compare_defaults()
         tab_style = self.settings.value("tab_style", default_setting("tab_style", "practical"))
         tab_style_index = self.tab_style_combo.findData(tab_style)
         self.tab_style_combo.setCurrentIndex(max(0, tab_style_index))
-        language = self.settings.value("language", default_setting("language", "zh_CN"))
+        language = self.settings.value("language", default_setting("language", "en"))
         language_index = self.language_combo.findData(language)
         self.language_combo.setCurrentIndex(max(0, language_index))
         self.line_numbers_checkbox.setChecked(
@@ -568,6 +648,7 @@ class MoreSettingsDialog(QDialog):
             )
             return
         self._load_controls_from_settings()
+        self.accept()
 
 
 class JsonHighlighter(QSyntaxHighlighter):
@@ -1187,6 +1268,67 @@ class SearchState:
     revision: int = -1
 
 
+@dataclass
+class FileBinding:
+    path: Path | None = None
+    encoding: str = "utf-8"
+    newline: str = "\n"
+    bom: bytes = b""
+    digest: str = ""
+    saved_text_digest: str = ""
+
+    @classmethod
+    def read(cls, path):
+        raw = path.read_bytes()
+        encoding, bom = "utf-8", b""
+        for marker, codec in ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF16_LE, "utf-16-le"),
+                              (codecs.BOM_UTF16_BE, "utf-16-be")):
+            if raw.startswith(marker):
+                encoding, bom = codec, marker
+                break
+        text = raw[len(bom):].decode(encoding)
+        if "\x00" in text:
+            raise ValueError("Binary file")
+        first_break = re.search(r"\r\n|\r|\n", text)
+        newline = first_break.group() if first_break else "\n"
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return cls(path, encoding, newline, bom, hashlib.sha256(raw).hexdigest(),
+                   cls.text_digest(text)), text
+
+    @staticmethod
+    def text_digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def encode(self, text):
+        return self.bom + text.replace("\n", self.newline).encode(self.encoding)
+
+
+@dataclass
+class WorkspaceTab:
+    kind: Literal["document", "compare"]
+    widget: QWidget
+    sources: tuple[str, str] | None = None
+
+
+class WorkspaceToolbarStack(QStackedWidget):
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_height()
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            self._fit_height()
+        return handled
+
+    def _fit_height(self):
+        width = self.width()
+        height = max((max(page.sizeHint().height(), page.layout().heightForWidth(width))
+                    for page in (self.widget(index) for index in range(self.count()))), default=0)
+        if height != self.minimumHeight():
+            self.setFixedHeight(height)
+
+
 class JsonWindow(QMainWindow):
     minimum_editor_font_size = 8
     maximum_editor_font_size = 32
@@ -1195,6 +1337,8 @@ class JsonWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.next_tab_number = 1
+        self.tabs: list[WorkspaceTab] = []
+        self._compare_visible = False
         self._search_editor: JsonEditor | None = None
         self.search_matches: list[tuple[int, int]] = []
         self.search_index = -1
@@ -1203,6 +1347,7 @@ class JsonWindow(QMainWindow):
         self.search_candidate_selection: tuple[int, int] | None = None
         self.selecting_search_match = False
         self.focus_mode_enabled = False
+        self._unsaved_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
         self._session_ready = False
         self._session_restoring = False
         self._session_dirty = False
@@ -1230,9 +1375,9 @@ class JsonWindow(QMainWindow):
         self.theme = self.settings.value("theme", default_setting("theme", "light"))
         if self.theme not in ("light", "dark"):
             self.theme = "light"
-        self.language = self.settings.value("language", default_setting("language", "zh_CN"))
+        self.language = self.settings.value("language", default_setting("language", "en"))
         if self.language not in ("zh_CN", "en"):
-            self.language = "zh_CN"
+            self.language = "en"
         self.line_wrap_enabled = setting_as_bool(
             self.settings,
             "line_wrap",
@@ -1256,6 +1401,7 @@ class JsonWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(application_icon_path())))
         self.resize(1560, 720)
         self.setMinimumSize(760, 480)
+        self._apply_ui_font()
         self._build_ui()
         self._connect()
         self.apply_language(self.language)
@@ -1267,10 +1413,24 @@ class JsonWindow(QMainWindow):
         self._last_session_snapshot = self._session_snapshot() if restored else None
         self._session_dirty = False
         self.editor.setFocus()
+        self._sync_document_list()
 
     @property
     def editor(self) -> QPlainTextEdit:
         return self.editor_stack.currentWidget()
+
+    @property
+    def compare_view(self):
+        index = self.tab_bar.currentIndex()
+        if 0 <= index < len(self.tabs) and self.tabs[index].kind == "compare":
+            return self.tabs[index].widget
+        return next((tab.widget for tab in reversed(self.tabs) if tab.kind == "compare"), None)
+
+    def _document_tab_index(self, editor):
+        return next((i for i, tab in enumerate(self.tabs) if tab.widget is editor), -1)
+
+    def _comparisons(self):
+        return [tab for tab in self.tabs if tab.kind == "compare"]
 
     def tr(self, chinese: str, english: str, **values) -> str:
         return localized(self.language, chinese, english, **values)
@@ -1315,14 +1475,21 @@ class JsonWindow(QMainWindow):
 
     def _session_payload(self) -> dict:
         tabs = []
-        for index in range(self.tab_bar.count()):
-            editor = self.editor_stack.widget(index)
+        documents = [tab for tab in self.tabs if tab.kind == "document"]
+        for tab in documents:
+            editor = tab.widget
+            index = self.tabs.index(tab)
             if editor is None:
                 continue
             cursor = editor.textCursor()
+            binding = editor.file
             tabs.append({
                 "title": self.tab_bar.tabText(index),
-                "content": editor.toPlainText(),
+                "content": self._file_text(editor),
+                **({"file": {"path": str(binding.path), "encoding": binding.encoding,
+                            "newline": binding.newline, "bom": binding.bom.hex(),
+                            "digest": binding.digest, "saved_text_digest": binding.saved_text_digest}}
+                   if binding.path else {}),
                 "cursor_position": cursor.position(),
                 "cursor_anchor": cursor.anchor(),
                 "vertical_scroll": editor.verticalScrollBar().value(),
@@ -1332,7 +1499,7 @@ class JsonWindow(QMainWindow):
             })
         return {
             "version": 1,
-            "active_tab": max(0, self.tab_bar.currentIndex()),
+            "active_tab": next((i for i, tab in enumerate(documents) if tab.widget is self.editor), 0),
             "next_tab_number": self.next_tab_number,
             "tabs": tabs,
         }
@@ -1426,7 +1593,23 @@ class JsonWindow(QMainWindow):
                 if isinstance(title, str) and title.strip():
                     self.tab_bar.setTabText(index, title)
                 content = item.get("content", "")
-                editor.setPlainText(content if isinstance(content, str) else "")
+                content = content if isinstance(content, str) else ""
+                info = item.get("file")
+                if isinstance(info, dict) and isinstance(info.get("path"), str) and Path(info["path"]).is_absolute():
+                    encoding = info.get("encoding")
+                    newline = info.get("newline")
+                    bom = info.get("bom")
+                    if encoding in ("utf-8", "utf-16-le", "utf-16-be") and newline in ("\n", "\r", "\r\n") and bom in ("", "efbbbf", "fffe", "feff"):
+                        binding = FileBinding(Path(info["path"]), encoding, newline, bytes.fromhex(bom),
+                                              info.get("digest", ""), info.get("saved_text_digest", ""))
+                        if binding.text_digest(content) == binding.saved_text_digest:
+                            try:
+                                binding, content = FileBinding.read(binding.path)
+                            except (OSError, ValueError):
+                                pass  # Keep the recoverable session copy.
+                        editor.file = binding
+                editor.setPlainText(content)
+                self._update_file_icon(editor)
 
                 collapsed = item.get("collapsed_blocks", [])
                 if isinstance(collapsed, list):
@@ -1506,6 +1689,9 @@ class JsonWindow(QMainWindow):
         self.subtitle = QLabel("粘贴、整理和定位 JSON")
         self.subtitle.setObjectName("subtitle")
         title_row.addWidget(title)
+        version = QLabel(APP_VERSION)
+        version.setObjectName("headerVersion")
+        title_row.addWidget(version)
         title_row.addSpacing(10)
         title_row.addWidget(self.subtitle)
         title_row.addStretch()
@@ -1528,6 +1714,21 @@ class JsonWindow(QMainWindow):
         self.about_action = QAction("关于", self)
         self.theme_menu.addAction(self.about_action)
         self.settings_button.setMenu(self.theme_menu)
+        self.file_button = QToolButton()
+        self.file_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.file_button)
+        self.file_button.setMenu(menu)
+        self.file_actions = []
+        for key, handler in ((QKeySequence.StandardKey.Open, self.open_files),
+                             (QKeySequence.StandardKey.Save, self.save_active_file),
+                             (QKeySequence.StandardKey.SaveAs, lambda: self.save_active_file(save_as=True))):
+            action = menu.addAction("")
+            action.setShortcut(key)
+            action.triggered.connect(handler)
+            self.addAction(action)
+            self.file_actions.append(action)
+        self.setAcceptDrops(True)
+        title_row.addWidget(self.file_button)
         title_row.addWidget(self.settings_button)
         layout.addWidget(self.drag_bar)
 
@@ -1564,6 +1765,11 @@ class JsonWindow(QMainWindow):
         self.add_tab_button.setToolTip("新建标签页")
         self.focus_mode_button = self._button("专注编辑")
         self.focus_mode_button.setCheckable(True)
+        self.documents_button = QToolButton()
+        self.documents_button.setObjectName("compareFilesButton")
+        self.documents_button.setCheckable(True)
+        self.documents_button.setChecked(setting_as_bool(self.settings, "documents_visible", True))
+        tab_row.addWidget(self.documents_button)
         tab_row.addWidget(self.tab_bar)
         tab_row.addWidget(self.tab_left_button)
         tab_row.addWidget(self.tab_right_button)
@@ -1638,7 +1844,9 @@ class JsonWindow(QMainWindow):
         toolbar_layout = QVBoxLayout(self.toolbar_container)
         toolbar_layout.setContentsMargins(20, 7, 20, 0)
         toolbar_layout.addWidget(toolbar)
-        layout.addWidget(self.toolbar_container)
+        self.toolbar_stack = WorkspaceToolbarStack()
+        self.toolbar_stack.addWidget(self.toolbar_container)
+        layout.addWidget(self.toolbar_stack)
 
         self.editor_stack = QStackedWidget()
         self.editor_stack.setObjectName("editorStack")
@@ -1646,7 +1854,31 @@ class JsonWindow(QMainWindow):
         editor_layout = QVBoxLayout(self.editor_container)
         editor_layout.setContentsMargins(20, 12, 20, 0)
         editor_layout.addWidget(self.editor_stack)
-        layout.addWidget(self.editor_container, 1)
+        self.workspace = QStackedWidget()
+        self.workspace.addWidget(self.editor_container)
+        self.document_sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(self.document_sidebar)
+        sidebar_layout.setContentsMargins(8, 12, 4, 0)
+        self.documents_label = QLabel()
+        sidebar_layout.addWidget(self.documents_label)
+        self.document_list = DocumentList()
+        list_font = self.document_list.font()
+        list_font.setPointSizeF(list_font.pointSizeF() + 1)
+        self.document_list.setFont(list_font)
+        self.document_list.setIconSize(self.tab_bar.iconSize())
+        self.document_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.document_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.document_list.setMinimumWidth(100)
+        sidebar_layout.addWidget(self.document_list)
+        self.workspace_splitter = QSplitter()
+        self.workspace_splitter.addWidget(self.document_sidebar)
+        self.workspace_splitter.addWidget(self.workspace)
+        self.workspace_splitter.setCollapsible(1, False)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        sidebar_width = setting_as_int(self.settings, "documents_width", 200, 100, 600)
+        self.workspace_splitter.setSizes([sidebar_width, 1300])
+        self.document_sidebar.setVisible(self.documents_button.isChecked())
+        layout.addWidget(self.workspace_splitter, 1)
         self._build_search_bar()
         self.editor_container.installEventFilter(self)
 
@@ -1747,6 +1979,13 @@ class JsonWindow(QMainWindow):
         self.search_bar.hide()
 
     def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+            if self._handle_file_drop(event):
+                return True
+        if event.type() == QEvent.Type.FocusIn:
+            view = self.compare_view
+            if view and watched in (view.left, view.right):
+                view.active_side = int(watched is view.right)
         if watched is self.editor_container and event.type() == QEvent.Type.Resize:
             self._position_search_bar()
         if watched is self.search_input and event.type() == QEvent.Type.KeyPress:
@@ -1755,6 +1994,23 @@ class JsonWindow(QMainWindow):
                 self.navigate_search(direction)
                 return True
         return super().eventFilter(watched, event)
+
+    def _handle_file_drop(self, event):
+        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if not paths:
+            return False
+        event.acceptProposedAction()
+        if event.type() == QEvent.Type.Drop:
+            self._open_paths(paths)
+        return True
+
+    def dragEnterEvent(self, event):
+        if not self._handle_file_drop(event):
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        if not self._handle_file_drop(event):
+            super().dropEvent(event)
 
     def _position_search_bar(self):
         if not hasattr(self, "search_bar"):
@@ -1769,6 +2025,10 @@ class JsonWindow(QMainWindow):
         self.search_bar.raise_()
 
     def _connect(self):
+        self.documents_button.toggled.connect(self._toggle_documents)
+        self.workspace_splitter.splitterMoved.connect(self._save_documents_width)
+        self.document_list.itemClicked.connect(self._document_clicked)
+        self.document_list.customContextMenuRequested.connect(self._show_document_menu)
         self.format_button.clicked.connect(
             lambda: self.apply_transform(False, "double", preserve_source=True)
         )
@@ -1825,7 +2085,7 @@ class JsonWindow(QMainWindow):
         self.tab_left_button.clicked.connect(lambda: self.navigate_tab(-1))
         self.tab_right_button.clicked.connect(lambda: self.navigate_tab(1))
         self.tab_bar.currentChanged.connect(self.switch_tab)
-        self.tab_bar.tabCloseRequested.connect(self.close_tab)
+        self.tab_bar.tabCloseRequested.connect(self._close_tab_from_button)
         self.tab_bar.middleClickCloseRequested.connect(
             lambda index: self.close_tab(index, confirm=False)
         )
@@ -1851,7 +2111,7 @@ class JsonWindow(QMainWindow):
         )
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.apply_transform(True, "double"))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.add_tab)
-        QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tab_bar.currentIndex()))
+        QShortcut(QKeySequence("Ctrl+W"), self, activated=self._close_current_view)
         focus_modifier = "Meta" if sys.platform == "darwin" else "Ctrl"
         QShortcut(
             QKeySequence(f"{focus_modifier}+Shift+F"),
@@ -1873,15 +2133,199 @@ class JsonWindow(QMainWindow):
 
     def toggle_focus_mode(self, enabled: bool):
         """Show the editor with only its compact tab strip for more working room."""
+        self.documents_button.setVisible(not enabled)
         self.focus_mode_enabled = enabled
+        self._update_document_sidebar()
         self.drag_bar.setVisible(not enabled)
-        self.toolbar_container.setVisible(not enabled)
-        self.hint_container.setVisible(not enabled)
-        self.status_bar.setVisible(not enabled)
+        self.toolbar_stack.setVisible(not enabled or self._compare_visible)
+        self.hint_container.setVisible(not enabled and not self._compare_visible)
+        self.status_bar.setVisible(not enabled and not self._compare_visible)
         if self.focus_mode_button.isChecked() != enabled:
             self.focus_mode_button.setChecked(enabled)
         self._update_focus_mode_button()
-        self.editor.setFocus()
+        (self.compare_view.primary_editor if self._compare_visible else self.editor).setFocus()
+
+    def _update_document_sidebar(self):
+        self.documents_button.setEnabled(not self._compare_visible)
+        visible = self.documents_button.isChecked() and not self.focus_mode_enabled and not self._compare_visible
+        self.document_sidebar.setVisible(visible)
+        if visible and self.workspace_splitter.sizes()[0] == 0:
+            width = setting_as_int(self.settings, "documents_width", 200, 100, 600)
+            self.workspace_splitter.setSizes([width, max(300, self.workspace_splitter.width() - width)])
+
+    def _toggle_documents(self, visible):
+        self._update_document_sidebar()
+        self.settings.setValue("documents_visible", visible)
+
+    def _save_documents_width(self, *_):
+        width = self.workspace_splitter.sizes()[0]
+        if width >= 100 and self.documents_button.isChecked():
+            self.settings.setValue("documents_width", width)
+
+    def _sync_document_list(self):
+        selected = {item.data(Qt.ItemDataRole.UserRole) for item in self.document_list.selectedItems()}
+        with QSignalBlocker(self.document_list):
+            self.document_list.clear()
+            for index, tab in enumerate(self.tabs):
+                if tab.kind != "document":
+                    continue
+                editor = tab.widget
+                item = QListWidgetItem(self.tab_bar.tabText(index))
+                item.setData(Qt.ItemDataRole.UserRole, editor.document_id)
+                item.setToolTip(str(editor.file.path or item.text()))
+                item.setIcon(self.tab_bar.tabIcon(index))
+                font = self.document_list.font()
+                font.setBold(editor is self.editor)
+                item.setFont(font)
+                self.document_list.addItem(item)
+                item.setSelected(editor.document_id in selected)
+        for tab in self._comparisons():
+            view = tab.widget
+            sources = [self._find_document(key) for key in tab.sources]
+            view.available = all(source is not None for source in sources)
+            for pane, source in zip((view.left, view.right), sources):
+                pane.setReadOnly(source is None)
+            for label, source in zip(view.titles, sources):
+                label.setEnabled(source is not None)
+                if source is not None:
+                    label.setText(self.tab_bar.tabText(self._document_tab_index(source)))
+                label.setToolTip(label.text())
+            self.tab_bar.setTabText(self.tabs.index(tab), " ↔ ".join(label.text() for label in view.titles))
+            view.update_message()
+
+    def _find_document(self, document_id):
+        for index in range(self.editor_stack.count()):
+            editor = self.editor_stack.widget(index)
+            if editor.document_id == document_id:
+                return editor
+        return None
+
+    def _document_clicked(self, item):
+        if QApplication.keyboardModifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.ShiftModifier):
+            return
+        editor = self._find_document(item.data(Qt.ItemDataRole.UserRole))
+        if editor is not None:
+            index = self._document_tab_index(editor)
+            self.tab_bar.setCurrentIndex(index)
+            self.switch_tab(index)
+            editor.setFocus()
+
+    def _create_document_menu(self):
+        menu = QMenu(self.document_list)
+        selected = self.document_list.selectedItems()
+        if len(selected) == 1:
+            editor = self._find_document(selected[0].data(Qt.ItemDataRole.UserRole))
+            return self._create_tab_context_menu(self._document_tab_index(editor))
+        if len(selected) == 2:
+            action = menu.addAction(self.tr("对比", "Compare"))
+            action.triggered.connect(self._compare_selected_documents)
+        return menu
+
+    def _show_document_menu(self, position):
+        if self.document_list.itemAt(position) is not None:
+            menu = self._create_document_menu()
+            if not menu.isEmpty():
+                menu.exec(self.document_list.viewport().mapToGlobal(position))
+
+    def _compare_selected_documents(self):
+        items = sorted(self.document_list.selectedItems(), key=self.document_list.row)
+        if len(items) != 2:
+            return
+        sources = tuple(item.data(Qt.ItemDataRole.UserRole) for item in items)
+        existing = next((tab for tab in self._comparisons() if tab.sources == sources), None)
+        if existing is not None:
+            self.tab_bar.setCurrentIndex(self.tabs.index(existing))
+            return
+        view = CompareView(JsonHighlighter, highlight=self.settings.value("diff_highlight", "words"),
+                           viewer=self.settings.value("diff_viewer", "side"),
+                           align=setting_as_bool(self.settings, "diff_align", False),
+                           wrap=setting_as_bool(self.settings, "diff_wrap", False),
+                           sync=setting_as_bool(self.settings, "diff_sync", True))
+        tab = WorkspaceTab("compare", view, sources)
+        self.tabs.append(tab)
+        self.workspace.addWidget(view)
+        self.toolbar_stack.addWidget(view.toolbar)
+        view.set_title_font_size(self.ui_font_size + 1)
+        view.set_appearance(self.theme, self.editor_font_size)
+        view.retranslate(self.language)
+        view.textEdited.connect(lambda side, text: self._apply_comparison_edit(tab, side, text))
+        view.historyRequested.connect(lambda side, redo: self._comparison_history(tab, side, redo))
+        view.active_side = 1 if view.unified else 0
+        for side, (title, pane) in enumerate(zip(view.titles, (view.left, view.right))):
+            title.clicked.connect(lambda checked=False, side=side: self._activate_source(tab, side))
+            pane.installEventFilter(self)
+            pane.viewport().installEventFilter(self)
+        view.swapRequested.connect(lambda: self._swap_compare(tab))
+        with QSignalBlocker(self.tab_bar):
+            index = self.tab_bar.addTab(self._compare_icon, "")
+        self._sync_document_list()
+        self._refresh_compare(tab)
+        self.tab_bar.setCurrentIndex(index)
+        self.switch_tab(index)
+        self._update_tab_count_button()
+
+    def _activate_source(self, tab, side):
+        editor = self._find_document(tab.sources[side])
+        if editor is not None:
+            self.tab_bar.setCurrentIndex(self._document_tab_index(editor))
+            editor.setFocus()
+
+    def _apply_comparison_edit(self, tab, side, text):
+        source = self._find_document(tab.sources[side])
+        if source is not None:
+            update_document_text(source, source.toPlainText(), text)
+
+    def _comparison_history(self, tab, side, redo):
+        source = self._find_document(tab.sources[side])
+        if source is not None:
+            (source.redo if redo else source.undo)()
+
+    def _refresh_compare(self, tab=None):
+        if tab is None:
+            tab = next((item for item in self._comparisons() if item.widget is self.compare_view), None)
+        if tab is None:
+            return
+        sources = [self._find_document(key) for key in tab.sources]
+        self._sync_document_list()
+        if all(source is not None for source in sources):
+            tab.widget.start(*(source.toPlainText() for source in sources))
+
+    def _swap_compare(self, tab=None):
+        if tab is None:
+            tab = next((item for item in self._comparisons() if item.widget is self.compare_view), None)
+        if tab is None:
+            return
+        tab.sources = tab.sources[::-1]
+        view = tab.widget
+        titles = [label.text() for label in view.titles][::-1]
+        for label, title in zip(view.titles, titles):
+            label.setText(title)
+        view.swap_snapshot()
+        self._sync_document_list()
+
+    def _set_workspace_mode(self, view=None):
+        self._compare_visible = view is not None
+        self._update_document_sidebar()
+        self.toolbar_stack.setCurrentWidget(view.toolbar if view is not None else self.toolbar_container)
+        self.toolbar_stack.setVisible(view is not None or not self.focus_mode_enabled)
+        if view is not None:
+            self.close_search()
+        self.workspace.setCurrentWidget(view if view is not None else self.editor_container)
+        for widget in (self.hint_container, self.status_bar):
+            widget.setVisible(view is None and not self.focus_mode_enabled)
+        target = view.primary_editor if view is not None else self.editor
+        if target is not None:
+            target.setFocus()
+
+    def _show_compare(self, visible):
+        target = self.compare_view if visible else self.editor
+        index = next((i for i, tab in enumerate(self.tabs) if tab.widget is target), -1)
+        if index >= 0:
+            self.tab_bar.setCurrentIndex(index)
+            self.switch_tab(index)
+
+    def _close_current_view(self):
+        self.close_tab(self.tab_bar.currentIndex())
 
     def _update_focus_mode_button(self):
         shortcut = "⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F"
@@ -1917,6 +2361,9 @@ class JsonWindow(QMainWindow):
             )
         )
         editor.setObjectName("editor")
+        editor.document_id = uuid4().hex
+        editor.file = FileBinding()
+        editor.viewport().installEventFilter(self)
         editor.setPlaceholderText(self.tr(
             '在这里粘贴 JSON，例如：\n日志前缀... {"user": {"name": "Alice"}} ...尾部内容',
             'Paste JSON here, for example:\nLog prefix... {"user": {"name": "Alice"}} ...suffix',
@@ -1956,8 +2403,10 @@ class JsonWindow(QMainWindow):
         editor = self._create_editor()
         title = f"untitled-{self.next_tab_number}"
         self.next_tab_number += 1
-        index = self.tab_bar.addTab(title)
-        self.editor_stack.insertWidget(index, editor)
+        self.tabs.append(WorkspaceTab("document", editor))
+        with QSignalBlocker(self.tab_bar):
+            index = self.tab_bar.addTab(title)
+        self.editor_stack.addWidget(editor)
         self._update_tab_count_button()
         self.tab_bar.setCurrentIndex(index)
         self.switch_tab(index)
@@ -1966,11 +2415,16 @@ class JsonWindow(QMainWindow):
         self._mark_session_dirty()
 
     def switch_tab(self, index: int):
-        if 0 <= index < self.editor_stack.count():
-            target = self.editor_stack.widget(index)
+        if 0 <= index < len(self.tabs):
+            tab = self.tabs[index]
+            if tab.kind == "compare":
+                self._set_workspace_mode(tab.widget)
+                self._update_tab_navigation()
+                return
+            target = tab.widget
             if target is not self._search_editor:
                 self._save_search_state()
-            self.editor_stack.setCurrentIndex(index)
+            self.editor_stack.setCurrentWidget(target)
             if target is not self._search_editor:
                 self._search_editor = target
                 self._restore_search_state()
@@ -1979,6 +2433,8 @@ class JsonWindow(QMainWindow):
             self._update_fold_button()
             self._update_selection_highlights()
             self._mark_session_dirty()
+            self._set_workspace_mode()
+            self._sync_document_list()
 
     def _fold_state_changed(self, editor: JsonEditor):
         if editor is self.editor:
@@ -2090,9 +2546,13 @@ class JsonWindow(QMainWindow):
             editor.setTabStopDistance(editor.fontMetrics().horizontalAdvance("  "))
             editor._update_gutter_width()
             editor.gutter.update()
+        for tab in self._comparisons():
+            tab.widget.set_appearance(self.theme, size)
         self._flash(self.tr("编辑器字号：{size} pt", "Editor font size: {size} pt", size=size))
 
     def toggle_all_folds(self):
+        if self._compare_visible:
+            return
         editor = self.editor
         if editor is None or not editor.fold_regions:
             self._flash(self.tr("当前内容没有可折叠的对象或数组", "No collapsible objects or arrays"))
@@ -2104,12 +2564,16 @@ class JsonWindow(QMainWindow):
         editor._apply_fold_visibility()
 
     def toggle_bookmark(self):
+        if self._compare_visible:
+            return
         editor = self.editor
         if editor is None:
             return
         editor.set_bookmark()
 
     def navigate_bookmark(self, direction: int):
+        if self._compare_visible:
+            return
         editor = self.editor
         if editor is None:
             return
@@ -2138,27 +2602,54 @@ class JsonWindow(QMainWindow):
             total=len(bookmarks),
         ))
 
+    def _close_tab_from_button(self, index):
+        if not 0 <= index < len(self.tabs):
+            return
+        if self.tabs[index].kind == "compare" and not self._confirm_close_tab(
+            self.tab_bar.tabText(index), comparison=True
+        ):
+            return
+        self.close_tab(index)
+
     def close_tab(self, index: int, *, confirm: bool = True):
-        if index < 0:
+        if not 0 <= index < len(self.tabs):
             return
-        editor = self.editor_stack.widget(index)
-        if editor is None:
-            return
-        if confirm and editor.toPlainText() and not self._confirm_close_tab(self.tab_bar.tabText(index)):
-            return
-        if self.tab_bar.count() == 1:
-            editor.clear()
-            editor.search_state = SearchState()
-            self._restore_search_state()
-            self.tab_bar.setTabText(0, f"untitled-{self.next_tab_number}")
-            self.next_tab_number += 1
-            self._update_tab_count_button()
-            self._mark_session_dirty()
-            return
-        # Both tab collections must agree before currentChanged restores Find.
+        tab = self.tabs[index]
+        editor = tab.widget
+        if tab.kind == "document":
+            if editor.file.path and editor.file.text_digest(self._file_text(editor)) != editor.file.saved_text_digest:
+                options = QMessageBox.StandardButton
+                choice = QMessageBox.question(self, self.tr("保存更改", "Save Changes"),
+                    self.tr("保存对 {name} 的更改？", "Save changes to {name}?", name=editor.file.path.name),
+                    options.Save | options.Discard | options.Cancel, options.Save)
+                if choice == options.Cancel or (choice == options.Save and not self._save_file(editor)):
+                    return
+            elif not editor.file.path and confirm and editor.toPlainText() and not self._confirm_close_tab(self.tab_bar.tabText(index)):
+                return
+            if self.editor_stack.count() == 1:
+                editor.file = FileBinding()
+                editor.document_id = uuid4().hex
+                self._update_file_icon(editor)
+                editor.setPlainText("")
+                editor.search_state = SearchState()
+                self._restore_search_state()
+                self.tab_bar.setTabText(index, f"untitled-{self.next_tab_number}")
+                self.next_tab_number += 1
+                self._update_tab_count_button()
+                self._mark_session_dirty()
+                return
+            if editor is self._search_editor:
+                self._save_search_state()
+                self._search_editor = None
+            self.editor_stack.removeWidget(editor)
+        else:
+            editor.dispose()
+            self.toolbar_stack.removeWidget(editor.toolbar)
+            editor.toolbar.deleteLater()
+            self.workspace.removeWidget(editor)
         with QSignalBlocker(self.tab_bar):
             self.tab_bar.removeTab(index)
-        self.editor_stack.removeWidget(editor)
+        self.tabs.pop(index)
         editor.deleteLater()
         self._update_tab_count_button()
         self.switch_tab(self.tab_bar.currentIndex())
@@ -2173,6 +2664,7 @@ class JsonWindow(QMainWindow):
             count=count,
         ))
         QTimer.singleShot(0, self._update_tab_navigation)
+        self._sync_document_list()
 
     def _update_tab_navigation(self):
         if not hasattr(self, "tab_bar"):
@@ -2192,16 +2684,123 @@ class JsonWindow(QMainWindow):
         self._update_tab_navigation()
 
     def move_tab(self, old_index: int, new_index: int):
-        editor = self.editor_stack.widget(old_index)
-        if editor is None:
+        if not 0 <= old_index < len(self.tabs):
             return
-        self.editor_stack.removeWidget(editor)
-        self.editor_stack.insertWidget(new_index, editor)
-        self.switch_tab(new_index)
+        tab = self.tabs.pop(old_index)
+        self.tabs.insert(new_index, tab)
+        active_editor = self.editor
+        for index, document in enumerate(item for item in self.tabs if item.kind == "document"):
+            self.editor_stack.removeWidget(document.widget)
+            self.editor_stack.insertWidget(index, document.widget)
+        self.editor_stack.setCurrentWidget(active_editor)
+        self.switch_tab(self.tab_bar.currentIndex())
+        self._sync_document_list()
         self._mark_session_dirty()
 
-    def rename_tab(self, index: int):
+    @staticmethod
+    def _file_text(editor):
+        return editor.document().toRawText().replace("\u2029", "\n")
+
+    def _file_error(self, path, error):
+        QMessageBox.warning(self, self.tr("文件操作失败", "File operation failed"), f"{path}\n{error}")
+
+    def _editor_for_path(self, path):
+        return next((tab.widget for tab in self.tabs if tab.kind == "document"
+                     and tab.widget.file.path == path), None)
+
+    def open_files(self):
+        names, _ = QFileDialog.getOpenFileNames(self, self.tr("打开文件", "Open files"))
+        self._open_paths(map(Path, names))
+
+    def _open_paths(self, paths):
+        for path in paths:
+            path = path.resolve()
+            editor = self._editor_for_path(path)
+            if editor is None:
+                try:
+                    binding, content = FileBinding.read(path)
+                except (OSError, ValueError) as error:
+                    self._file_error(path, error)
+                    continue
+                self.add_tab()
+                editor = self.editor
+                editor.file = binding
+                editor.setPlainText(content)
+                self._update_file_icon(editor)
+                self.tab_bar.setTabText(self._document_tab_index(editor), path.name)
+                self._sync_document_list()
+                self._mark_session_dirty()
+            self.tab_bar.setCurrentIndex(self._document_tab_index(editor))
+
+    def save_active_file(self, *, save_as=False):
+        index = self.tab_bar.currentIndex()
         if index < 0:
+            return
+        tab = self.tabs[index]
+        editor = tab.widget
+        if tab.kind == "compare":
+            side = 1 if editor.unified else editor.active_side
+            editor = self._find_document(tab.sources[side])
+        if editor is not None:
+            self._save_file(editor, save_as=save_as)
+
+    def _save_file(self, editor, *, save_as=False):
+        binding = editor.file
+        path = binding.path
+        index = self._document_tab_index(editor)
+        if save_as or path is None:
+            name, _ = QFileDialog.getSaveFileName(self, self.tr("另存为", "Save As"),
+                                                  str(path or self.tab_bar.tabText(index)))
+            if not name:
+                return False
+            path = Path(name).resolve()
+        owner = self._editor_for_path(path)
+        if owner is not None and owner is not editor:
+            self._file_error(path, self.tr("文件已在其他标签打开。", "This file is open in another tab."))
+            return False
+        text = self._file_text(editor)
+        try:
+            if path == binding.path:
+                current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+                if current != binding.digest:
+                    answer = QMessageBox.question(self, self.tr("文件已更改", "File changed"),
+                        self.tr("磁盘文件已更改或移除。仍要保存吗？", "The file changed on disk or was removed. Save anyway?"),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+                    if answer != QMessageBox.StandardButton.Yes:
+                        return False
+                elif binding.text_digest(text) == binding.saved_text_digest:
+                    return True
+            data = binding.encode(text)
+            output = QSaveFile(str(path))
+            if not output.open(QIODevice.OpenModeFlag.WriteOnly) or output.write(data) != len(data) or not output.commit():
+                raise OSError(output.errorString())
+        except (OSError, UnicodeError) as error:
+            self._file_error(path, error)
+            return False
+        binding.path = path
+        binding.digest = hashlib.sha256(data).hexdigest()
+        binding.saved_text_digest = binding.text_digest(text)
+        editor.document().setModified(False)
+        self._update_file_icon(editor)
+        if self.tab_bar.tabText(index) != path.name or save_as or owner is None:
+            self.tab_bar.setTabText(index, path.name)
+            self._sync_document_list()
+        self._mark_session_dirty()
+        return True
+
+    def _reveal_file(self, path):
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer.exe", "/select,", str(path)])
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        except OSError as error:
+            self._file_error(path, error)
+
+    def rename_tab(self, index: int):
+        if index < 0 or self.tabs[index].kind != "document":
             return
         current = self.tab_bar.tabText(index)
         title, accepted = QInputDialog.getText(
@@ -2211,9 +2810,25 @@ class JsonWindow(QMainWindow):
             text=current,
         )
         title = title.strip()
-        if accepted and title:
+        if accepted and title and title != current:
+            binding = self.tabs[index].widget.file
+            if binding.path:
+                try:
+                    if Path(title).name != title or title in (".", ".."):
+                        raise ValueError(self.tr("请输入文件名。", "Enter a file name."))
+                    target = binding.path.with_name(title)
+                    if target.exists() or target.is_symlink() or self._editor_for_path(target):
+                        raise FileExistsError(str(target))
+                    file = QFile(str(binding.path))
+                    if not file.rename(str(target)):
+                        raise OSError(file.errorString())
+                    binding.path = target
+                except (ValueError, OSError) as error:
+                    self._file_error(binding.path, error)
+                    return
             self.tab_bar.setTabText(index, title)
             self._mark_session_dirty()
+            self._sync_document_list()
 
     def show_tab_context_menu(self, position: QPoint):
         index = self.tab_bar.tabAt(position)
@@ -2224,19 +2839,27 @@ class JsonWindow(QMainWindow):
 
     def _create_tab_context_menu(self, index: int) -> QMenu:
         menu = QMenu(self.tab_bar)
-        rename_action = menu.addAction(self.tr("重命名", "Rename"))
-        rename_action.triggered.connect(lambda _checked=False: self.rename_tab(index))
+        if self.tabs[index].kind == "document":
+            rename_action = menu.addAction(self.tr("重命名", "Rename"))
+            rename_action.triggered.connect(lambda _checked=False: self.rename_tab(index))
+        close_action = menu.addAction(self.tr("关闭", "Close"))
+        close_action.triggered.connect(lambda _checked=False: self.close_tab(index, confirm=False))
+        tab = self.tabs[index]
+        if tab.kind == "document" and tab.widget.file.path:
+            label = self.tr("在 Finder 中显示", "Open in Finder") if sys.platform == "darwin" else self.tr("在文件管理器中显示", "Open in Explorer")
+            menu.addAction(label, lambda: self._reveal_file(tab.widget.file.path))
         return menu
 
-    def _confirm_close_tab(self, title: str) -> bool:
+    def _confirm_close_tab(self, title: str, *, comparison: bool = False) -> bool:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle(self.tr("关闭标签", "Close Tab"))
         box.setText(self.tr("确定要关闭“{title}”吗？", 'Close "{title}"?', title=title))
-        box.setInformativeText(self.tr(
-            "该标签中有内容，关闭后内容将丢失。",
-            "This tab contains text. Its contents will be lost.",
-        ))
+        if not comparison:
+            box.setInformativeText(self.tr(
+                "该标签中有内容，关闭后内容将丢失。",
+                "This tab contains text. Its contents will be lost.",
+            ))
         cancel_button = box.addButton(self.tr("取消", "Cancel"), QMessageBox.ButtonRole.RejectRole)
         close_button = box.addButton(self.tr("关闭", "Close"), QMessageBox.ButtonRole.DestructiveRole)
         box.setDefaultButton(cancel_button)
@@ -2248,7 +2871,7 @@ class JsonWindow(QMainWindow):
         dialog = MoreSettingsDialog(self.settings, self.language, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.apply_language(
-                self.settings.value("language", default_setting("language", "zh_CN"))
+                self.settings.value("language", default_setting("language", "en"))
             )
             brace_guides_visible = setting_as_bool(
                 self.settings,
@@ -2296,7 +2919,15 @@ class JsonWindow(QMainWindow):
             theme = self.settings.value("theme", default_setting("theme", "light"))
             if theme not in ("light", "dark"):
                 theme = "light"
+            self._apply_ui_font()
+            size = setting_as_int(self.settings, "editor_font_size", self.default_editor_font_size,
+                                  self.minimum_editor_font_size, self.maximum_editor_font_size)
+            if size != self.editor_font_size:
+                self.adjust_editor_font_size(size - self.editor_font_size)
             self.apply_theme(theme)
+            self.documents_button.setChecked(setting_as_bool(self.settings, "documents_visible", True))
+            width = setting_as_int(self.settings, "documents_width", 200, 100, 600)
+            self.workspace_splitter.setSizes([width, max(300, self.workspace_splitter.width() - width)])
 
     def show_about(self):
         box = QMessageBox(self)
@@ -2391,6 +3022,8 @@ class JsonWindow(QMainWindow):
             self._update_search_highlights()
 
     def open_search(self):
+        if self._compare_visible:
+            return
         if self.search_bar.isVisible():
             self.search_input.setFocus()
             self.search_input.selectAll()
@@ -2571,6 +3204,8 @@ class JsonWindow(QMainWindow):
         editor.set_search_extra_selections(selections)
 
     def paste(self):
+        if self._compare_visible:
+            return
         text = QApplication.clipboard().text()
         if text:
             self.editor.setPlainText(text)
@@ -2692,6 +3327,8 @@ class JsonWindow(QMainWindow):
         return 0
 
     def remove_null_fields(self):
+        if self._compare_visible:
+            return
         text = self.editor.toPlainText()
         if not text.strip():
             QMessageBox.warning(self, APP_NAME, self.tr("请先粘贴 JSON", "Paste JSON first"))
@@ -2762,6 +3399,8 @@ class JsonWindow(QMainWindow):
                 JsonWindow._sort_object_keys(item, reverse=reverse)
 
     def sort_keys(self, *, reverse: bool):
+        if self._compare_visible:
+            return
         text = self.editor.toPlainText()
         if not text.strip():
             self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
@@ -2813,6 +3452,8 @@ class JsonWindow(QMainWindow):
         self.update_path()
 
     def apply_key_initial_case(self, *, uppercase: bool):
+        if self._compare_visible:
+            return
         text = self.editor.toPlainText()
         if not text.strip():
             self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
@@ -2864,6 +3505,8 @@ class JsonWindow(QMainWindow):
         value_quote: str | None = None,
         preserve_presentation: bool = False,
     ):
+        if self._compare_visible:
+            return
         text = self.editor.toPlainText()
         if not text.strip():
             self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
@@ -2964,6 +3607,8 @@ class JsonWindow(QMainWindow):
         self.update_path()
 
     def apply_quote_escapes(self, *, target_quote: str | None) -> None:
+        if self._compare_visible:
+            return
         text = self.editor.toPlainText()
         if not text.strip():
             self._flash(self.tr("请先粘贴 JSON", "Paste JSON first"), error=True)
@@ -3074,9 +3719,30 @@ class JsonWindow(QMainWindow):
         box.exec()
         return box.clickedButton() is continue_button
 
+    def _update_file_icon(self, editor):
+        index = self._document_tab_index(editor)
+        if index < 0:
+            return
+        icon = QIcon()
+        if editor.file.path:
+            dirty = editor.file.text_digest(self._file_text(editor)) != editor.file.saved_text_digest
+            icon = self._unsaved_icon if dirty else self._saved_file_icon
+        if self.tab_bar.tabIcon(index).cacheKey() != icon.cacheKey():
+            self.tab_bar.setTabIcon(index, icon)
+            for row in range(self.document_list.count()):
+                item = self.document_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == editor.document_id:
+                    item.setIcon(icon)
+                    break
+
     def _editor_text_changed(self, editor: QPlainTextEdit):
-        self._mark_session_dirty()
         text = editor.toPlainText()
+        if editor.file.path:
+            self._update_file_icon(editor)
+        for tab in self._comparisons():
+            if editor.document_id in tab.sources:
+                tab.widget.update_source(tab.sources.index(editor.document_id), text)
+        self._mark_session_dirty()
         if not text:
             editor.json_current_value = None
             editor.json_rendered_text = None
@@ -3179,12 +3845,27 @@ class JsonWindow(QMainWindow):
 
     def apply_language(self, language: str):
         if language not in ("zh_CN", "en"):
-            language = "zh_CN"
+            language = "en"
         self.language = language
         self.settings.setValue("language", language)
         self.settings.sync()
         self.default_hint = platform_shortcut_hint(language=language)
+        self.documents_button.setText(self.tr("对比文件", "Compare Files"))
+        self.documents_label.setText(self.tr("打开的文档", "OPEN DOCUMENTS"))
+        modifier = "⌘" if sys.platform == "darwin" else "Ctrl"
+        compare_tip = self.tr(
+            "在左侧列表中按住 {key} 并点选两个文件，再右键选择“对比”。",
+            "Hold {key} and click two files in the sidebar, then right-click and choose Compare.",
+            key=modifier,
+        )
+        self.documents_button.setToolTip(compare_tip)
+        self.document_list.setToolTip(compare_tip)
+        for tab in self._comparisons():
+            tab.widget.retranslate(language)
 
+        self.file_button.setText(self.tr("文件", "File"))
+        for action, labels in zip(self.file_actions, (("打开…", "Open…"), ("保存", "Save"), ("另存为…", "Save As…"))):
+            action.setText(self.tr(*labels))
         self.subtitle.setText(self.tr("粘贴、整理和定位 JSON", "Paste, format, and navigate JSON"))
         self.settings_button.setText(self.tr("⚙ 设置", "⚙ Settings"))
         self.appearance_section.setText(self.tr("外观", "Appearance"))
@@ -3282,8 +3963,46 @@ class JsonWindow(QMainWindow):
         self._update_tab_count_button()
         self._refresh_active_status()
 
+    def _apply_ui_font(self):
+        self.ui_font_size = setting_as_int(self.settings, "ui_font_size", system_ui_size(), 9, 24)
+        font = QApplication.font()
+        font.setPointSize(self.ui_font_size)
+        QApplication.setFont(font)
+        if hasattr(self, "document_list"):
+            font.setPointSize(self.ui_font_size + 1)
+            self.document_list.setFont(font)
+            self._sync_document_list()
+            for tab in self._comparisons():
+                tab.widget.set_title_font_size(self.ui_font_size + 1)
+
     def apply_theme(self, theme: str):
         self.theme = theme
+        glyph = QPixmap(32, 32)
+        glyph.setDevicePixelRatio(2)
+        glyph.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(glyph)
+        ink = QColor("#AAB7C7" if theme == "dark" else "#64748B")
+        for row, width in enumerate((12, 9, 6)):
+            painter.fillRect(2, 3 + row * 4, width, 2, ink)
+        painter.end()
+        self._saved_file_icon = QIcon(glyph)
+        badge = QPixmap(32, 32)
+        badge.setDevicePixelRatio(2)
+        badge.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(badge)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        colors = ("#3574B9", "#087F78") if theme == "light" else ("#427BC5", "#168780")
+        for x, color in zip((1, 8.5), colors):
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(x, 1.0, 6.5, 14.0, 1.5, 1.5)
+            painter.fillRect(round(x + 1), 5, 4, 1, QColor("white"))
+            painter.fillRect(round(x + 1), 8, 3, 1, QColor("white"))
+        painter.end()
+        self._compare_icon = QIcon(badge)
+        for tab in self._comparisons():
+            self.tab_bar.setTabIcon(self.tabs.index(tab), self._compare_icon)
+            tab.widget.set_appearance(theme, self.editor_font_size)
         self.settings.setValue("theme", theme)
         self.dark_action.setChecked(theme == "dark")
         self.light_action.setChecked(theme == "light")
@@ -3297,13 +4016,14 @@ class JsonWindow(QMainWindow):
                 editor = self.editor_stack.widget(index)
                 editor.json_highlighter.set_theme(theme)
                 editor.set_editor_theme(theme)
+                self._update_file_icon(editor)
                 editor.set_line_numbers_visible(show_line_numbers)
             self._update_selection_highlights()
         if theme == "light":
             self.setStyleSheet("""
                 QMainWindow, QWidget { background: #F4F7FB; color: #1E293B; }
                 QLabel#title { font-size: 23px; font-weight: 700; color: #0F172A; }
-                QLabel#subtitle, QLabel#hint { color: #64748B; }
+                QLabel#headerVersion, QLabel#subtitle, QLabel#hint { color: #64748B; }
                 QLabel#hint { font-size: 12px; padding-left: 4px; }
                 QLabel#hint[error="true"] { color: #BE123C; }
                 QFrame#dragBar, QFrame#tabRow { background: #E8EEF6; border: none; }
@@ -3325,6 +4045,7 @@ class JsonWindow(QMainWindow):
                 QFrame#searchBar QLabel#matchCount { color: #64748B; font-size: 11px; }
                 QFrame#searchBar QComboBox { padding: 4px 6px; min-width: 82px; }
                 QFrame#toolbar { background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; }
+                QToolButton#compareFilesButton:disabled { color: #64748B; background: #E2E8F0; border: 1px solid #CBD5E1; }
                 QPushButton, QToolButton {
                     background: #F8FAFC; color: #334155; border: 1px solid #CBD5E1;
                     border-radius: 7px; padding: 7px 11px; font-weight: 600;
@@ -3364,7 +4085,7 @@ class JsonWindow(QMainWindow):
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #0B1120; color: #DDE7F3; }
             QLabel#title { font-size: 23px; font-weight: 700; color: #F8FAFC; }
-            QLabel#subtitle, QLabel#hint { color: #73849A; }
+            QLabel#headerVersion, QLabel#subtitle, QLabel#hint { color: #73849A; }
             QLabel#hint { font-size: 12px; padding-left: 4px; }
             QLabel#hint[error="true"] { color: #FDA4AF; }
             QFrame#dragBar, QFrame#tabRow { background: #0F192B; border: none; }
@@ -3386,6 +4107,7 @@ class JsonWindow(QMainWindow):
             QFrame#searchBar QLabel#matchCount { color: #AAB8CA; font-size: 11px; }
             QFrame#searchBar QComboBox { padding: 4px 6px; min-width: 82px; }
             QFrame#toolbar { background: #111B2E; border: 1px solid #243149; border-radius: 10px; }
+            QToolButton#compareFilesButton:disabled { color: #94A3B8; background: #253142; border: 1px solid #3C495B; }
             QPushButton, QToolButton {
                 background: #17243A; color: #C9D5E5; border: 1px solid #2B3A54;
                 border-radius: 7px; padding: 7px 11px; font-weight: 600;
@@ -3486,7 +4208,10 @@ class JsonWindow(QMainWindow):
                 }
                 QTabBar::tab:hover:!selected { background: #30415A; color: #F1F5F9; }
             """
-        self.setStyleSheet(self.styleSheet() + tab_style_sheet)
+        scale = self.ui_font_size / system_ui_size()
+        sheet = re.sub(r"font-size: (\d+)px", lambda match: f"font-size: {round(int(match[1]) * scale)}px",
+                       self.styleSheet())
+        self.setStyleSheet(sheet + tab_style_sheet)
         if hasattr(self, "search_bar") and self.search_bar.isVisible():
             self._update_search_highlights()
 
@@ -3506,7 +4231,7 @@ def main():
     ):
         instance_lock, already_running = acquire_instance_lock()
         if already_running:
-            language = startup_settings.value("language", default_setting("language", "zh_CN"))
+            language = startup_settings.value("language", default_setting("language", "en"))
             QMessageBox.information(
                 None,
                 APP_NAME,

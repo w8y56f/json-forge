@@ -68,6 +68,8 @@ SOURCE_FILES = (
     "VERSION",
     "app.py",
     "json_tools.py",
+    "text_diff.py",
+    "compare_view.py",
     "version_info.py",
     "windows_taskbar.py",
     "requirements.txt",

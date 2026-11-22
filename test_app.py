@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtGui import QCloseEvent, QTextCursor
+from PySide6.QtCore import QMimeData, QUrl, QPoint, QSettings, Qt
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QCloseEvent, QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit, QTabBar
 
@@ -155,7 +155,7 @@ class SettingsStorageTests(unittest.TestCase):
         defaults = default_settings_values(force_reload=True)
         self.assertTrue(default_settings_file_path().is_file())
         self.assertEqual(defaults.get("theme"), "light")
-        self.assertEqual(defaults.get("language"), "zh_CN")
+        self.assertEqual(defaults.get("language"), "en")
         self.assertEqual(defaults.get("tab_style"), "practical")
         self.assertEqual(defaults.get("show_line_numbers"), "true")
         self.assertEqual(defaults.get("confirm_exit"), "true")
@@ -197,7 +197,7 @@ class SettingsStorageTests(unittest.TestCase):
 
             self.assertTrue(reset_settings_to_defaults(settings))
             self.assertEqual(settings.value("theme"), "light")
-            self.assertEqual(settings.value("language"), "zh_CN")
+            self.assertEqual(settings.value("language"), "en")
             self.assertEqual(settings.value("single_instance"), "true")
 
 
@@ -220,6 +220,54 @@ class SessionPersistenceTests(unittest.TestCase):
         os.environ.pop("JSON_STUDIO_SETTINGS_PATH", None)
         os.environ.pop("JSON_STUDIO_SESSION_PATH", None)
         self.directory.cleanup()
+
+    def test_file_actions_restore_dirty_content_and_detect_external_changes(self):
+        window = JsonWindow()
+        self.addCleanup(window.deleteLater)
+        path = Path(self.directory.name).resolve() / "example.txt"
+        path.write_bytes(b"\xfe\xff" + "one\r\ntwo".encode("utf-16-be"))
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        viewport = window.editor.viewport()
+        for event_type in (QDragEnterEvent, QDropEvent):
+            event = event_type(QPoint(4, 4), Qt.DropAction.CopyAction, mime,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(viewport, event)
+            self.assertTrue(event.isAccepted())
+        self.assertEqual(window.editor.file.path, path)
+        index = window.tab_bar.currentIndex()
+        saved_icon = window.tab_bar.tabIcon(index).cacheKey()
+        self.assertFalse(window.tab_bar.tabIcon(index).isNull())
+        window.editor.insertPlainText("edit")
+        self.assertEqual(window.tab_bar.tabIcon(index).cacheKey(), window._unsaved_icon.cacheKey())
+        self.assertEqual(window.document_list.item(index).icon().cacheKey(), window._unsaved_icon.cacheKey())
+        window.editor.undo()
+        self.assertEqual(window.tab_bar.tabIcon(index).cacheKey(), saved_icon)
+        self.assertEqual(window.document_list.item(index).icon().cacheKey(), saved_icon)
+        window._open_paths([path])
+        self.assertEqual(window.tab_bar.count(), 2)
+        window.editor.insertPlainText("start ")
+        window.file_actions[1].trigger()
+        self.assertEqual(path.read_bytes(), b"\xfe\xff" + "start one\r\ntwo".encode("utf-16-be"))
+        window.editor.insertPlainText("draft ")
+        window._save_session(force=True)
+        path.write_text("external")
+        restored = JsonWindow()
+        self.addCleanup(restored.deleteLater)
+        self.assertEqual(restored.editor.file.path, path)
+        self.assertEqual(restored.tab_bar.tabIcon(index).cacheKey(), restored._unsaved_icon.cacheKey())
+        self.assertEqual(restored.editor.toPlainText(), "start draft one\ntwo")
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
+            self.assertFalse(restored._save_file(restored.editor))
+        self.assertEqual(path.read_text(), "external")
+        target = path.with_name("separate.txt")
+        with patch("app.QFileDialog.getSaveFileName", return_value=(str(target), "")):
+            restored.file_actions[2].trigger()
+        self.assertEqual(restored.editor.file.path, target)
+        with patch("app.QInputDialog.getText", return_value=("renamed.txt", True)):
+            restored.rename_tab(restored.tab_bar.currentIndex())
+        self.assertFalse(target.exists())
+        self.assertEqual(restored.editor.file.path.read_bytes(), b"\xfe\xff" + "start draft one\r\ntwo".encode("utf-16-be"))
 
     def test_tabs_and_editor_state_are_restored(self):
         window = JsonWindow()
@@ -299,6 +347,7 @@ class LanguageUiTests(unittest.TestCase):
     def setUp(self):
         settings = QSettings(self.settings_path, QSettings.Format.IniFormat)
         settings.clear()
+        settings.setValue("language", "zh_CN")
         settings.setValue("confirm_exit", False)
         settings.sync()
         self.window = JsonWindow()
@@ -443,7 +492,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(self.window.focus_mode_button.text(), "退出专注")
         self.assertTrue(self.window.drag_bar.isHidden())
         self.assertFalse(self.window.tab_row_widget.isHidden())
-        self.assertTrue(self.window.toolbar_container.isHidden())
+        self.assertTrue(self.window.toolbar_stack.isHidden())
         self.assertTrue(self.window.hint_container.isHidden())
         self.assertTrue(self.window.status_bar.isHidden())
 
@@ -451,7 +500,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertFalse(self.window.focus_mode_enabled)
         self.assertEqual(self.window.focus_mode_button.text(), "专注编辑")
         self.assertFalse(self.window.drag_bar.isHidden())
-        self.assertFalse(self.window.toolbar_container.isHidden())
+        self.assertFalse(self.window.toolbar_stack.isHidden())
         self.assertFalse(self.window.hint_container.isHidden())
         self.assertFalse(self.window.status_bar.isHidden())
 
@@ -692,7 +741,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(self.window.tab_bar.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
         self.window.apply_language("en")
         menu = self.window._create_tab_context_menu(0)
-        self.assertEqual([action.text() for action in menu.actions()], ["Rename"])
+        self.assertEqual([action.text() for action in menu.actions()], ["Rename", "Close"])
 
     def test_general_settings_contains_persisted_language(self):
         self.window.apply_language("en")
@@ -700,7 +749,7 @@ class LanguageUiTests(unittest.TestCase):
         self.assertEqual(dialog.language_combo.currentData(), "en")
         self.assertEqual(dialog.windowTitle(), "More Settings")
         self.assertEqual(dialog.brace_guides_checkbox.text(), "Closing Brace Guide")
-        self.assertEqual(dialog.restore_defaults_button.text(), "Restore Default Settings")
+        self.assertEqual(dialog.restore_defaults_button.text(), "Restore All Defaults")
         self.assertTrue(dialog.single_instance_checkbox.isChecked())
         dialog.single_instance_checkbox.setChecked(False)
         dialog.brace_guides_checkbox.setChecked(False)
